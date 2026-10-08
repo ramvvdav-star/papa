@@ -4,12 +4,59 @@ export type UserRole = 'ADMIN' | 'TEACHER' | 'STUDENT';
 
 export type AccountStatus = 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED' | 'PENDING';
 
+export type CourseType = 'JEE' | 'JEE_ADVANCED' | 'NEET';
+
+export type EnrollmentStatus = 'ACTIVE' | 'SUSPENDED' | 'EXPIRED' | 'INACTIVE';
+
+export interface CourseRecord {
+  id: string; // 'course_jee' | 'course_jee_adv' | 'course_neet'
+  name: string;
+  type: CourseType;
+  description: string;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface EnrollmentRecord {
+  id: string;
+  studentId: string;
+  studentName?: string;
+  studentCode?: string | null;
+  courseId: string;
+  courseType: CourseType;
+  status: EnrollmentStatus;
+  assignedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StudyMaterialRecord {
+  id: string;
+  courseId: string;
+  courseType: CourseType;
+  subject: SubjectName;
+  chapter: string;
+  title: string;
+  materialType: 'NOTES' | 'FORMULA_SHEET' | 'PYQ_BOOKLET' | 'CONCEPT_SUMMARY' | 'SYLLABUS';
+  resourceType?: string;
+  description: string;
+  contentBody: string;
+  contentSummary?: string;
+  content?: string;
+  createdBy: string;
+  authorName?: string;
+  createdAt: string;
+}
+
 export interface TeacherPermissions {
   canCreateTests: boolean;
   canCreateQuestions: boolean;
+  canUploadQuestions?: boolean;
+  canEditQuestions?: boolean;
   canManageBatches: boolean;
   canResetStudentPasswords: boolean;
   canViewAllStudents: boolean;
+  assignedCourses?: CourseType[];
 }
 
 export interface AuthProfile {
@@ -25,6 +72,11 @@ export interface AuthProfile {
   batchName?: string | null;
   className?: string | null;
   examCategory: ExamType;
+  courseId: string; // 'course_jee' | 'course_jee_adv' | 'course_neet'
+  courseType: CourseType; // 'JEE' | 'JEE_ADVANCED' | 'NEET'
+  enrollmentStatus: EnrollmentStatus; // 'ACTIVE' | 'SUSPENDED' | 'EXPIRED' | 'INACTIVE'
+  assignedCourses: CourseType[]; // e.g. ['JEE'] or ['JEE', 'JEE_ADVANCED'] or ['NEET']
+  enrollments?: EnrollmentRecord[];
   targetYear: number;
   subjectAccess: SubjectName[];
   testAccess: string[];
@@ -44,6 +96,8 @@ export interface BatchRecord {
   name: string;
   description: string;
   examCategory: ExamType;
+  courseId?: string;
+  courseType?: CourseType;
   className: string;
   teacherId: string;
   teacherName: string;
@@ -56,6 +110,7 @@ export interface BatchRecord {
 export interface TestAssignmentRecord {
   id: string;
   testId: string;
+  courseId?: string;
   visibility: 'PUBLIC' | 'ASSIGNED_ONLY';
   assignedByUserId: string;
   assignedTeacherIds: string[];
@@ -69,6 +124,8 @@ export interface AnnouncementRecord {
   id: string;
   title: string;
   content: string;
+  courseId?: string; // 'ALL' | 'course_jee' | 'course_jee_adv' | 'course_neet'
+  courseType?: CourseType | 'ALL';
   authorId: string;
   authorName: string;
   authorRole: UserRole;

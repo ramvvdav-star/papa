@@ -19,6 +19,11 @@ import {
 import {
   AuthProfile,
   UserRole,
+  CourseType,
+  EnrollmentStatus,
+  CourseRecord,
+  EnrollmentRecord,
+  StudyMaterialRecord,
   BatchRecord,
   TestAssignmentRecord,
   AnnouncementRecord,
@@ -32,8 +37,12 @@ import {
   computeQuestionFingerprint,
   enrichQuestionRecord,
   formatCanonicalQuestionId,
+  selectQuestionsIntelligent,
   selectQuestionsForBlueprint,
   createOrResolveAttemptSnapshot,
+  generateUniqueTestId,
+  validateGeneratedTestQuestions,
+  buildTestQuestionMappings,
 } from '../data/questionBankEngine';
 
 export type AppView =
@@ -49,7 +58,6 @@ export type AppView =
   | 'result'
   | 'admin-dashboard'
   | 'admin-questions'
-  | 'admin-ai-generator'
   | 'admin-paper-builder'
   | 'teacher-dashboard'
   | 'student-custom-test'
@@ -58,8 +66,55 @@ export type AppView =
   | 'bookmarks-mistakes'
   | 'profile';
 
-// URL Path <-> AppView helpers
-function viewToPath(view: AppView): string {
+export function isCourseMatchForUser(
+  profile: AuthProfile | null,
+  targetCourseOrExam?: string | null
+): boolean {
+  if (!profile) return false;
+  if (profile.role === 'ADMIN') return true;
+  if (!targetCourseOrExam || targetCourseOrExam === 'ALL') return true;
+
+  const upper = targetCourseOrExam.toUpperCase();
+  const normTarget: CourseType =
+    upper === 'NEET' || upper === 'COURSE_NEET'
+      ? 'NEET'
+      : upper === 'JEE_ADVANCED' || upper === 'COURSE_JEE_ADV'
+      ? 'JEE_ADVANCED'
+      : 'JEE';
+
+  if (profile.role === 'TEACHER') {
+    const assigned = profile.assignedCourses?.length
+      ? profile.assignedCourses
+      : [profile.courseType || 'JEE'];
+    if (normTarget === 'NEET') return assigned.includes('NEET');
+    if (normTarget === 'JEE_ADVANCED') return assigned.includes('JEE_ADVANCED');
+    return assigned.includes('JEE') || assigned.includes('JEE_ADVANCED');
+  }
+
+  // STUDENT strict enrollment check
+  if (profile.enrollmentStatus && profile.enrollmentStatus !== 'ACTIVE') return false;
+  const studentCourse: CourseType =
+    profile.courseType ||
+    (profile.examCategory === 'NEET'
+      ? 'NEET'
+      : profile.examCategory === 'JEE_ADVANCED'
+      ? 'JEE_ADVANCED'
+      : 'JEE');
+
+  if (studentCourse === 'NEET') return normTarget === 'NEET';
+  if (studentCourse === 'JEE_ADVANCED') return normTarget === 'JEE' || normTarget === 'JEE_ADVANCED';
+  return normTarget === 'JEE';
+}
+
+// URL Path <-> AppView helpers with course-aware student paths
+function viewToPath(view: AppView, profile?: AuthProfile | null): string {
+  const courseSlug =
+    profile?.role === 'STUDENT'
+      ? profile.courseType === 'NEET' || profile.examCategory === 'NEET'
+        ? 'neet'
+        : 'jee'
+      : null;
+
   switch (view) {
     case 'login':
       return '/login';
@@ -68,16 +123,15 @@ function viewToPath(view: AppView): string {
     case 'access-denied':
       return '/access-denied';
     case 'student-dashboard':
-      return '/student/dashboard';
+      return courseSlug ? `/student/${courseSlug}/dashboard` : '/student/dashboard';
     case 'teacher-dashboard':
       return '/teacher/dashboard';
     case 'admin-dashboard':
     case 'admin-questions':
-    case 'admin-ai-generator':
     case 'admin-paper-builder':
       return '/admin/dashboard';
     case 'tests':
-      return '/tests';
+      return courseSlug ? `/student/${courseSlug}/mock-tests` : '/tests';
     case 'test-details':
       return '/tests/details';
     case 'instructions':
@@ -87,13 +141,13 @@ function viewToPath(view: AppView): string {
     case 'cbt-exam':
       return '/exam/live';
     case 'result':
-      return '/results';
+      return courseSlug ? `/student/${courseSlug}/results` : '/results';
     case 'student-custom-test':
-      return '/student/custom-test';
+      return courseSlug ? `/student/${courseSlug}/custom-test` : '/student/custom-test';
     case 'practice-engine':
-      return '/student/practice';
+      return courseSlug ? `/student/${courseSlug}/practice` : '/student/practice';
     case 'bookmarks-mistakes':
-      return '/student/bookmarks';
+      return courseSlug ? `/student/${courseSlug}/bookmarks` : '/student/bookmarks';
     case 'profile':
       return '/profile';
     case 'landing':
@@ -102,24 +156,79 @@ function viewToPath(view: AppView): string {
   }
 }
 
+function checkCoursePathViolation(pathname: string, profile: AuthProfile | null): string | null {
+  if (!profile) return null;
+  const clean = pathname.toLowerCase();
+  if (profile.role === 'STUDENT') {
+    const isNeetStudent = profile.courseType === 'NEET' || profile.examCategory === 'NEET';
+    if (clean.startsWith('/student/jee') && isNeetStudent) {
+      return 'Course Authorization Violation — Your account is enrolled in NEET UG. You cannot access JEE course routes (/student/jee/*).';
+    }
+    if (clean.startsWith('/student/neet') && !isNeetStudent) {
+      return `Course Authorization Violation — Your account is enrolled in ${
+        profile.courseType || 'JEE'
+      }. You cannot access NEET course routes (/student/neet/*).`;
+    }
+  }
+  return null;
+}
+
 function pathToView(pathname: string): AppView {
   const clean = pathname.toLowerCase().replace(/\/+$/, '') || '/';
   if (clean === '/login') return 'login';
   if (clean === '/student/first-login') return 'first-login-reset';
   if (clean.startsWith('/admin')) return 'admin-dashboard';
   if (clean.startsWith('/teacher')) return 'teacher-dashboard';
-  if (clean === '/student' || clean === '/student/dashboard' || clean === '/dashboard') {
+  if (
+    clean === '/student' ||
+    clean === '/student/dashboard' ||
+    clean === '/student/jee/dashboard' ||
+    clean === '/student/neet/dashboard' ||
+    clean === '/dashboard'
+  ) {
     return 'student-dashboard';
   }
-  if (clean === '/student/custom-test') return 'student-custom-test';
-  if (clean === '/student/practice') return 'practice-engine';
-  if (clean === '/student/bookmarks') return 'bookmarks-mistakes';
-  if (clean === '/tests' || clean === '/mock-tests') return 'tests';
+  if (
+    clean === '/student/custom-test' ||
+    clean === '/student/jee/custom-test' ||
+    clean === '/student/neet/custom-test'
+  ) {
+    return 'student-custom-test';
+  }
+  if (
+    clean === '/student/practice' ||
+    clean === '/student/jee/practice' ||
+    clean === '/student/neet/practice'
+  ) {
+    return 'practice-engine';
+  }
+  if (
+    clean === '/student/bookmarks' ||
+    clean === '/student/jee/bookmarks' ||
+    clean === '/student/neet/bookmarks'
+  ) {
+    return 'bookmarks-mistakes';
+  }
+  if (
+    clean === '/tests' ||
+    clean === '/mock-tests' ||
+    clean === '/student/jee/mock-tests' ||
+    clean === '/student/neet/mock-tests'
+  ) {
+    return 'tests';
+  }
   if (clean === '/tests/details') return 'test-details';
   if (clean === '/tests/instructions') return 'instructions';
   if (clean === '/tests/system-check') return 'system-check';
   if (clean === '/exam/live') return 'cbt-exam';
-  if (clean === '/results' || clean === '/result') return 'result';
+  if (
+    clean === '/results' ||
+    clean === '/result' ||
+    clean === '/student/jee/results' ||
+    clean === '/student/neet/results'
+  ) {
+    return 'result';
+  }
   if (clean === '/profile') return 'student-dashboard';
   if (clean === '/portal') return 'landing';
   return 'student-dashboard';
@@ -160,7 +269,10 @@ interface ExamContextType {
     reason?: string;
   }) => Promise<{ success: boolean; message: string }>;
 
-  // RBAC Managed Entities (Users, Teachers, Students, Batches, Assignments, Announcements)
+  // RBAC & Course Separation Managed Entities
+  courses: CourseRecord[];
+  enrollments: EnrollmentRecord[];
+  studyMaterials: StudyMaterialRecord[];
   managedUsers: AuthProfile[];
   batches: BatchRecord[];
   announcements: AnnouncementRecord[];
@@ -178,6 +290,26 @@ interface ExamContextType {
     temporaryPassword?: string;
   }>;
   updateUserAccount: (userId: string, patch: any) => Promise<{ success: boolean; error?: string }>;
+  updateStudentEnrollment: (params: {
+    studentId: string;
+    courseType: CourseType;
+    status?: EnrollmentStatus;
+    enrollmentStatus?: EnrollmentStatus;
+    includeJeeAdvanced?: boolean;
+  }) => Promise<{ success: boolean; error?: string }>;
+  createStudyMaterial: (data: any) => Promise<StudyMaterialRecord | null>;
+  deleteStudyMaterial: (id: string) => Promise<boolean>;
+  fetchRlsSecurityAudit: () => Promise<any>;
+  generateCourseAwareTest: (params: {
+    courseType?: CourseType;
+    examType?: ExamType;
+    subject: string;
+    chapters?: string[];
+    difficulty?: string;
+    questionCount?: number;
+    durationMinutes?: number;
+    title?: string;
+  }) => Promise<{ success: boolean; test?: TestDefinition; error?: string }>;
   deleteUserAccount: (userId: string) => Promise<{ success: boolean; error?: string }>;
   resetUserPassword: (
     userId: string,
@@ -225,6 +357,7 @@ interface ExamContextType {
   loadQuestions: (params?: {
     page?: number;
     limit?: number;
+    examType?: string;
     subject?: string;
     difficulty?: string;
     search?: string;
@@ -375,7 +508,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [currentView, setCurrentViewInternal] = useState<AppView>('login');
   const [currentUser, setCurrentUser] = useState<UserProfile>(defaultUser);
 
-  // RBAC Managed Collections
+  // RBAC & Course Managed Collections
+  const [courses, setCourses] = useState<CourseRecord[]>([]);
+  const [enrollments, setEnrollments] = useState<EnrollmentRecord[]>([]);
+  const [studyMaterials, setStudyMaterials] = useState<StudyMaterialRecord[]>([]);
   const [managedUsers, setManagedUsers] = useState<AuthProfile[]>([]);
   const [batches, setBatches] = useState<BatchRecord[]>([]);
   const [announcements, setAnnouncements] = useState<AnnouncementRecord[]>([]);
@@ -443,7 +579,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return;
       }
 
-      // Enforce Role-Based Routing (Section 6)
+      // Enforce Role-Based Routing (Section 6 & 19)
       if (targetView.startsWith('admin') && authProfile.role !== 'ADMIN') {
         setAccessDeniedMessage('Access Denied — Administrator privileges required.');
         setCurrentViewInternal('access-denied');
@@ -465,7 +601,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setAccessDeniedMessage(null);
       setCurrentViewInternal(targetView);
       try {
-        const nextPath = viewToPath(targetView);
+        const nextPath = viewToPath(targetView, authProfile);
         if (window.location.pathname !== nextPath) {
           window.history.pushState({}, '', nextPath);
         }
@@ -485,7 +621,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     else setCurrentView('student-dashboard');
   }, [authProfile, setCurrentView]);
 
-  // Handle browser Back/Forward buttons and direct URL entry
+  // Handle browser Back/Forward buttons and direct URL entry with course route protection
   useEffect(() => {
     const handlePopState = () => {
       const path = window.location.pathname;
@@ -499,6 +635,12 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         setCurrentViewInternal('login');
         return;
       }
+      const courseViolation = checkCoursePathViolation(path, authProfile);
+      if (courseViolation) {
+        setAccessDeniedMessage(courseViolation);
+        setCurrentViewInternal('access-denied');
+        return;
+      }
       const targetView = pathToView(path);
       setCurrentView(targetView);
     };
@@ -507,26 +649,36 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return () => window.removeEventListener('popstate', handlePopState);
   }, [authProfile, setCurrentView]);
 
-  // Fetch RBAC Data (Users, Batches, Announcements, Test Assignments, Recovery Requests, Audit Logs)
+  // Fetch RBAC & Course-Scoped Data
   const refreshRbacData = useCallback(async () => {
     if (!sessionToken) return;
     const headers = { Authorization: `Bearer ${sessionToken}` };
     try {
-      const [batchesRes, annRes, assignRes, attRes] = await Promise.all([
+      const [batchesRes, annRes, assignRes, attRes, coursesRes, enrRes, matRes] = await Promise.all([
         fetch('/api/auth/batches', { headers }),
         fetch('/api/auth/announcements', { headers }),
         fetch('/api/auth/test-assignments', { headers }),
-        fetch('/api/attempts'),
+        fetch('/api/attempts', { headers }),
+        fetch('/api/courses', { headers }),
+        fetch('/api/enrollments', { headers }),
+        fetch('/api/study-materials', { headers }),
       ]);
 
       if (batchesRes.ok) setBatches(await batchesRes.json());
       if (annRes.ok) setAnnouncements(await annRes.json());
       if (assignRes.ok) setTestAssignments(await assignRes.json());
+      if (coursesRes.ok) setCourses(await coursesRes.json());
+      if (enrRes.ok) setEnrollments(await enrRes.json());
+      if (matRes.ok) setStudyMaterials(await matRes.json());
       if (attRes.ok) {
         const allAtt: TestAttemptResult[] = await attRes.json();
         setAllAttempts(allAtt);
         if (authProfile) {
-          const mine = allAtt.filter((a) => a.userId === authProfile.id);
+          const mine = allAtt.filter(
+            (a) =>
+              a.userId === authProfile.id &&
+              isCourseMatchForUser(authProfile, a.courseType || a.courseId || a.examType)
+          );
           setAttemptHistory(mine);
         }
       }
@@ -628,6 +780,12 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           }
 
           if (desiredPath) {
+            const courseViolation = checkCoursePathViolation(desiredPath, profile);
+            if (courseViolation) {
+              setAccessDeniedMessage(courseViolation);
+              setCurrentViewInternal('access-denied');
+              return;
+            }
             const mapped = pathToView(desiredPath);
             if (mapped.startsWith('admin') && profile.role !== 'ADMIN') {
               setAccessDeniedMessage('Access Denied — Administrator privileges required.');
@@ -641,7 +799,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             }
             setCurrentViewInternal(mapped);
             try {
-              window.history.replaceState({}, '', viewToPath(mapped));
+              window.history.replaceState({}, '', viewToPath(mapped, profile));
             } catch {}
           } else {
             const defaultView: AppView =
@@ -652,7 +810,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 : 'student-dashboard';
             setCurrentViewInternal(defaultView);
             try {
-              window.history.replaceState({}, '', viewToPath(defaultView));
+              window.history.replaceState({}, '', viewToPath(defaultView, profile));
             } catch {}
           }
         }
@@ -723,10 +881,20 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return { success: true };
       }
 
-      // Check redirect target (Section 5 & 6)
+      // Check redirect target (Section 5, 6 & 19)
       if (redirectTarget && redirectTarget !== '/' && redirectTarget !== '/login') {
-        const targetView = pathToView(redirectTarget);
+        const targetPath = redirectTarget;
         setRedirectTarget(null);
+        const courseViolation = checkCoursePathViolation(targetPath, profile);
+        if (courseViolation) {
+          setAccessDeniedMessage(courseViolation);
+          setCurrentViewInternal('access-denied');
+          try {
+            window.history.pushState({}, '', targetPath);
+          } catch {}
+          return { success: true };
+        }
+        const targetView = pathToView(targetPath);
         if (targetView.startsWith('admin') && profile.role !== 'ADMIN') {
           setAccessDeniedMessage('Access Denied — Administrator privileges required.');
           setCurrentViewInternal('access-denied');
@@ -745,7 +913,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         }
         setCurrentViewInternal(targetView);
         try {
-          window.history.pushState({}, '', viewToPath(targetView));
+          window.history.pushState({}, '', viewToPath(targetView, profile));
         } catch {}
         return { success: true };
       }
@@ -759,7 +927,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           : 'student-dashboard';
       setCurrentViewInternal(nextView);
       try {
-        window.history.pushState({}, '', viewToPath(nextView));
+        window.history.pushState({}, '', viewToPath(nextView, profile));
       } catch {}
       return { success: true };
     } catch {
@@ -1051,6 +1219,103 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
+  const updateStudentEnrollment = async (params: {
+    studentId: string;
+    courseType: CourseType;
+    status?: EnrollmentStatus;
+    enrollmentStatus?: EnrollmentStatus;
+    includeJeeAdvanced?: boolean;
+  }): Promise<{ success: boolean; error?: string }> => {
+    if (!sessionToken) return { success: false, error: 'Not authenticated' };
+    const res = await fetch('/api/enrollments', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({
+        ...params,
+        enrollmentStatus: params.enrollmentStatus || params.status || 'ACTIVE',
+      }),
+    });
+    const out = await res.json();
+    if (!res.ok) return { success: false, error: out.error };
+    await refreshRbacData();
+    return { success: true };
+  };
+
+  const createStudyMaterial = async (data: any): Promise<StudyMaterialRecord | null> => {
+    if (!sessionToken) return null;
+    const res = await fetch('/api/study-materials', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({
+        ...data,
+        materialType: data.materialType || data.resourceType || 'NOTES',
+        contentBody: data.contentBody || data.contentSummary || data.content || '',
+      }),
+    });
+    if (!res.ok) return null;
+    const created: StudyMaterialRecord = await res.json();
+    await refreshRbacData();
+    return created;
+  };
+
+  const deleteStudyMaterial = async (id: string): Promise<boolean> => {
+    if (!sessionToken) return false;
+    const res = await fetch(`/api/study-materials/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    if (res.ok) await refreshRbacData();
+    return res.ok;
+  };
+
+  const fetchRlsSecurityAudit = async (): Promise<any> => {
+    if (!sessionToken) return null;
+    try {
+      const res = await fetch('/api/security/rls-audit', {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  };
+
+  const generateCourseAwareTest = async (params: {
+    courseType?: CourseType;
+    examType?: ExamType;
+    subject: string;
+    chapters?: string[];
+    difficulty?: string;
+    questionCount?: number;
+    durationMinutes?: number;
+    title?: string;
+  }): Promise<{ success: boolean; test?: TestDefinition; error?: string }> => {
+    if (!sessionToken) return { success: false, error: 'Not authenticated' };
+    try {
+      const res = await fetch('/api/tests/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify(params),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Course authorization check failed.' };
+      }
+      setTests((prev) => [data, ...prev]);
+      return { success: true, test: data };
+    } catch {
+      return { success: false, error: 'Failed to generate course-verified test.' };
+    }
+  };
+
   const [tests, setTests] = useState<TestDefinition[]>(SEED_TESTS);
   const [questions, setQuestions] = useState<Question[]>(() => getCentralizedQuestionBank());
   const [activeTest, setActiveTest] = useState<TestDefinition | null>(null);
@@ -1079,16 +1344,24 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     customTitle?: string
   ): Promise<TestDefinition> => {
     const bp = examBlueprints[blueprintKey] || OFFICIAL_EXAM_BLUEPRINTS.JEE_MAIN_2026;
-    const testId = `${bp.exam.toLowerCase().replace('_', '-')}-mock-${Date.now().toString().slice(-5)}`;
+    if (authProfile && !isCourseMatchForUser(authProfile, bp.exam)) {
+      throw new Error(`Course Security Error: Your account is not authorized to generate ${bp.exam} papers.`);
+    }
+    const testId = generateUniqueTestId(`test_${bp.exam.toLowerCase()}`);
     const selectedQuestions = selectQuestionsForBlueprint(questions, bp, testId);
+    validateGeneratedTestQuestions(selectedQuestions);
     const snapshotIds = selectedQuestions.map((q) => q.questionId || q.id);
+    const testQuestions = buildTestQuestionMappings(testId, selectedQuestions);
 
     const newTestPayload: Partial<TestDefinition> = {
       id: testId,
+      testId,
       title:
         customTitle ||
         `${bp.exam.replace('_', ' ')} Official Blueprint Mock (${new Date().toLocaleDateString()})`,
       subtitle: `${bp.totalQuestions} Compulsory Questions • ${bp.totalMarks} Marks • ${bp.durationMinutes} Minutes`,
+      courseId: bp.exam === 'NEET' ? 'course_neet' : bp.exam === 'JEE_ADVANCED' ? 'course_jee_adv' : 'course_jee',
+      courseType: bp.exam === 'NEET' ? 'NEET' : bp.exam === 'JEE_ADVANCED' ? 'JEE_ADVANCED' : 'JEE',
       examType: bp.exam,
       testType: 'FULL_MOCK',
       patternYear: 2026,
@@ -1109,11 +1382,13 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       sections: bp.sections,
       questions: selectedQuestions,
       snapshotQuestionIds: snapshotIds,
+      testQuestions,
       attemptSnapshots: [
         {
           attemptNumber: 1,
           setLabel: 'Set A',
           questionIds: snapshotIds,
+          testQuestions,
           createdAt: new Date().toISOString(),
         },
       ],
@@ -1127,7 +1402,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       await fetch(`/api/tests/${testId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify(patch),
       });
     } catch {}
@@ -1136,23 +1414,34 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const deleteTestDefinition = async (testId: string) => {
     try {
-      await fetch(`/api/tests/${testId}`, { method: 'DELETE' });
+      await fetch(`/api/tests/${testId}`, {
+        method: 'DELETE',
+        headers: sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {},
+      });
     } catch {}
     setTests((prev) => prev.filter((t) => t.id !== testId));
   };
 
-  // Compute accessible tests based on Section 12 (Test Access Control)
+  // Compute accessible tests based on strict Course Separation AND Test Access Control
   const accessibleTests = React.useMemo(() => {
     if (!authProfile) return [];
-    if (authProfile.role === 'ADMIN' || authProfile.role === 'TEACHER') {
+    if (authProfile.role === 'ADMIN') {
       return tests;
     }
 
-    // Student filtering: check testAssignments + batch assigned tests + direct student testAccess
+    const courseFilteredTests = tests.filter((test) =>
+      isCourseMatchForUser(authProfile, test.courseType || test.courseId || test.examType)
+    );
+
+    if (authProfile.role === 'TEACHER') {
+      return courseFilteredTests;
+    }
+
+    // Student filtering: check course match + testAssignments + batch assigned tests + direct student testAccess
     const assignmentMap = new Map<string, TestAssignmentRecord>();
     testAssignments.forEach((a) => assignmentMap.set(a.testId, a));
 
-    return tests.filter((test) => {
+    return courseFilteredTests.filter((test) => {
       if (!test.published) return false;
       const rule = assignmentMap.get(test.id);
       if (!rule || rule.visibility === 'PUBLIC') {
@@ -1166,6 +1455,15 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       return false;
     });
   }, [tests, authProfile, testAssignments]);
+
+  // Strictly course-filtered question bank for the authenticated user
+  const accessibleQuestions = React.useMemo(() => {
+    if (!authProfile) return [];
+    if (authProfile.role === 'ADMIN') return questions;
+    return questions.filter((q) =>
+      isCourseMatchForUser(authProfile, q.courseType || q.courseId || q.examType)
+    );
+  }, [questions, authProfile]);
 
   // Theme
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -1342,6 +1640,18 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         const parsed: ActiveExamSession = JSON.parse(saved);
         if (parsed && parsed.testId && parsed.timerSecondsLeft > 0) {
           setInProgressSession(parsed);
+          // Requirement 10: If user refreshes directly on /exam/live, load the exact saved snapshot without regenerating
+          if (window.location.pathname.toLowerCase().startsWith('/exam/live') && parsed.testSnapshot) {
+            setActiveTest(parsed.testSnapshot);
+            setResponses(parsed.responses || {});
+            setTimerSecondsLeft(parsed.timerSecondsLeft);
+            setExamStartTime(parsed.examStartTime || Date.now());
+            setCurrentQuestionIdx(parsed.currentQuestionIdx || 0);
+            setExamMode(parsed.examMode || 'SIMULATION');
+            setIntegrityEvents(parsed.integrityEvents || []);
+            setIsExamRunning(true);
+            setHasAutoSubmitted(false);
+          }
         }
       }
     } catch {}
@@ -1353,6 +1663,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       const sessionData: ActiveExamSession = {
         testId: activeTest.id,
+        attemptSetLabel: activeTest.activeAttemptSet,
+        snapshotQuestionIds: activeTest.snapshotQuestionIds,
+        testQuestions: activeTest.testQuestions,
+        testSnapshot: activeTest,
         responses,
         timerSecondsLeft,
         examStartTime,
@@ -1387,17 +1701,27 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   }, [isExamRunning, logIntegrityEvent]);
 
   const loadTests = useCallback(async () => {
+    if (!sessionToken) return;
     try {
-      const res = await fetch('/api/tests?customOnly=true');
+      const res = await fetch('/api/tests?customOnly=true', {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
       if (res.ok) {
         const customTests: TestDefinition[] = await res.json();
+        const allowedSeed = SEED_TESTS.filter((t) =>
+          authProfile
+            ? isCourseMatchForUser(authProfile, t.courseType || t.courseId || t.examType)
+            : true
+        );
         if (Array.isArray(customTests) && customTests.length > 0) {
           const customIds = new Set(customTests.map((t) => t.id));
-          setTests([...customTests, ...SEED_TESTS.filter((t) => !customIds.has(t.id))]);
+          setTests([...customTests, ...allowedSeed.filter((t) => !customIds.has(t.id))]);
+        } else {
+          setTests(allowedSeed);
         }
       }
     } catch {}
-  }, []);
+  }, [sessionToken, authProfile]);
 
   const [totalQuestionsInBank, setTotalQuestionsInBank] = useState<number>(50000);
   const [questionBankPage, setQuestionBankPage] = useState<number>(1);
@@ -1407,73 +1731,113 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     async (params?: {
       page?: number;
       limit?: number;
+      examType?: string;
       subject?: string;
       difficulty?: string;
       search?: string;
     }) => {
+      if (!sessionToken) return;
       try {
         const qPage = params?.page || 1;
         const qLimit = params?.limit || 50;
         let url = `/api/questions?page=${qPage}&limit=${qLimit}`;
+        if (params?.examType && params.examType !== 'ALL')
+          url += `&examType=${encodeURIComponent(params.examType)}`;
         if (params?.subject && params.subject !== 'ALL')
           url += `&subject=${encodeURIComponent(params.subject)}`;
         if (params?.difficulty && params.difficulty !== 'ALL')
           url += `&difficulty=${encodeURIComponent(params.difficulty)}`;
         if (params?.search) url += `&search=${encodeURIComponent(params.search)}`;
 
-        const res = await fetch(url);
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+        });
         if (res.ok) {
           const data = await res.json();
+          const central = getCentralizedQuestionBank().filter((q) =>
+            authProfile
+              ? isCourseMatchForUser(authProfile, q.courseType || q.courseId || q.examType)
+              : true
+          );
           if (data.items && Array.isArray(data.items)) {
-            const central = getCentralizedQuestionBank();
             const map = new Map<string, Question>();
-            data.items.forEach((q: Question) => map.set(q.questionId || q.id, enrichQuestionRecord(q)));
+            data.items.forEach((q: Question) => {
+              const enriched = enrichQuestionRecord(q);
+              if (
+                !authProfile ||
+                isCourseMatchForUser(
+                  authProfile,
+                  enriched.courseType || enriched.courseId || enriched.examType
+                )
+              ) {
+                map.set(enriched.questionId || enriched.id, enriched);
+              }
+            });
             central.forEach((q) => {
               const key = q.questionId || q.id;
               if (!map.has(key)) map.set(key, q);
             });
             setQuestions(Array.from(map.values()));
-            setTotalQuestionsInBank(Math.max(data.total || 50000, map.size));
+            setTotalQuestionsInBank(Math.max(data.total || map.size, map.size));
             setQuestionBankPage(data.page || 1);
-            setQuestionBankTotalPages(data.totalPages || 1000);
+            setQuestionBankTotalPages(data.totalPages || 1);
           } else if (Array.isArray(data) && data.length > 0) {
-            const central = getCentralizedQuestionBank();
             const map = new Map<string, Question>();
-            data.forEach((q: Question) => map.set(q.questionId || q.id, enrichQuestionRecord(q)));
+            data.forEach((q: Question) => {
+              const enriched = enrichQuestionRecord(q);
+              if (
+                !authProfile ||
+                isCourseMatchForUser(
+                  authProfile,
+                  enriched.courseType || enriched.courseId || enriched.examType
+                )
+              ) {
+                map.set(enriched.questionId || enriched.id, enriched);
+              }
+            });
             central.forEach((q) => {
               const key = q.questionId || q.id;
               if (!map.has(key)) map.set(key, q);
             });
             setQuestions(Array.from(map.values()));
-            setTotalQuestionsInBank(Math.max(50000, map.size));
+            setTotalQuestionsInBank(map.size);
           }
         }
       } catch {}
     },
-    []
+    [sessionToken, authProfile]
   );
 
   const loadAttempts = useCallback(async () => {
+    if (!sessionToken) return;
     try {
-      const res = await fetch('/api/attempts');
+      const res = await fetch('/api/attempts', {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
       if (res.ok) {
         const data: TestAttemptResult[] = await res.json();
         if (Array.isArray(data)) {
           setAllAttempts(data);
           if (authProfile) {
-            const mine = data.filter((a) => a.userId === authProfile.id);
+            const mine = data.filter(
+              (a) =>
+                a.userId === authProfile.id &&
+                isCourseMatchForUser(authProfile, a.courseType || a.courseId || a.examType)
+            );
             setAttemptHistory(mine);
           }
         }
       }
     } catch {}
-  }, [authProfile]);
+  }, [authProfile, sessionToken]);
 
   useEffect(() => {
-    loadTests();
-    loadQuestions();
-    loadAttempts();
-  }, [loadTests, loadQuestions, loadAttempts]);
+    if (sessionToken && authProfile) {
+      loadTests();
+      loadQuestions();
+      loadAttempts();
+    }
+  }, [sessionToken, authProfile, loadTests, loadQuestions, loadAttempts]);
 
   // Legacy shims
   const login = async (_email: string): Promise<boolean> => {
@@ -1552,7 +1916,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       const res = await fetch('/api/questions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify(enrichedPayload),
       });
       if (res.ok) {
@@ -1569,7 +1936,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const deleteQuestion = async (id: string): Promise<void> => {
     try {
-      await fetch(`/api/questions/${id}`, { method: 'DELETE' });
+      await fetch(`/api/questions/${id}`, {
+        method: 'DELETE',
+        headers: sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {},
+      });
     } catch {}
     setQuestions((prev) => prev.filter((q) => q.id !== id));
     logAdminAction('DELETE_QUESTION', id);
@@ -1596,31 +1966,53 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
     }
 
+    if (deduplicatedQuestions.length > 0) {
+      validateGeneratedTestQuestions(deduplicatedQuestions);
+    }
+
+    const assignedTestId =
+      newTest.testId && newTest.testId !== 'mock-test'
+        ? newTest.testId
+        : newTest.id && newTest.id !== 'mock-test'
+        ? newTest.id
+        : generateUniqueTestId('test');
+
     const snapshotIds = deduplicatedQuestions.map((q) => q.questionId || q.id);
+    const testQuestions = buildTestQuestionMappings(assignedTestId, deduplicatedQuestions);
 
     try {
       const res = await fetch('/api/tests', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify({
           ...newTest,
+          id: assignedTestId,
+          testId: assignedTestId,
           questions: deduplicatedQuestions,
           questionsCount: deduplicatedQuestions.length,
           snapshotQuestionIds: snapshotIds,
+          testQuestions,
         }),
       });
       if (res.ok) {
         const created = await res.json();
         const enrichedTest: TestDefinition = {
           ...created,
+          id: created.id || assignedTestId,
+          testId: created.testId || created.id || assignedTestId,
           questions: deduplicatedQuestions,
           questionsCount: deduplicatedQuestions.length,
           snapshotQuestionIds: snapshotIds,
+          testQuestions,
           attemptSnapshots: [
             {
               attemptNumber: 1,
               setLabel: 'Set A',
               questionIds: snapshotIds,
+              testQuestions,
               createdAt: created.createdAt || new Date().toISOString(),
             },
           ],
@@ -1632,7 +2024,8 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
     } catch {}
     const localTest: TestDefinition = {
-      id: newTest.id || `test-loc-${Date.now()}`,
+      id: assignedTestId,
+      testId: assignedTestId,
       title: newTest.title || 'New Practice Test',
       subtitle: newTest.subtitle || 'Comprehensive Mock',
       examType: newTest.examType || 'JEE_MAIN',
@@ -1653,11 +2046,13 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       sections: newTest.sections,
       questions: deduplicatedQuestions,
       snapshotQuestionIds: snapshotIds,
+      testQuestions,
       attemptSnapshots: [
         {
           attemptNumber: 1,
           setLabel: 'Set A',
           questionIds: snapshotIds,
+          testQuestions,
           createdAt: new Date().toISOString(),
         },
       ],
@@ -1668,19 +2063,32 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return localTest;
   };
 
-  // Start CBT Exam with Saved Snapshot & Multi-Attempt Set Support (Part 5)
+  // Start CBT Exam with Course-Authorization Guard, Saved Snapshot & Multi-Attempt Set Support
   const startCbtExam = (
     test: TestDefinition,
     mode: ExamMode = 'SIMULATION',
     attemptNumber?: number
   ) => {
+    if (
+      authProfile &&
+      !isCourseMatchForUser(authProfile, test.courseType || test.courseId || test.examType)
+    ) {
+      setAccessDeniedMessage(
+        `Course Security Violation — You are enrolled in ${
+          authProfile.courseType || authProfile.examCategory
+        } and cannot launch a ${test.courseType || test.examType} examination.`
+      );
+      setCurrentViewInternal('access-denied');
+      return;
+    }
+
     // Count how many times the current student has already attempted this test
     const myPriorAttemptsCount = attemptHistory.filter((a) => a.testId === test.id).length;
     const effectiveAttemptNum = attemptNumber ?? (myPriorAttemptsCount + 1);
 
     const resolvedSnapshot = createOrResolveAttemptSnapshot(
       test,
-      questions,
+      accessibleQuestions,
       effectiveAttemptNum
     );
 
@@ -1689,6 +2097,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       questions: resolvedSnapshot.questions,
       questionsCount: resolvedSnapshot.questions.length,
       snapshotQuestionIds: resolvedSnapshot.snapshotQuestionIds,
+      testQuestions: resolvedSnapshot.testQuestions,
       attemptSnapshots: resolvedSnapshot.updatedSnapshots,
       activeAttemptSet: resolvedSnapshot.setLabel,
     };
@@ -1700,6 +2109,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           ? {
               ...t,
               attemptSnapshots: resolvedSnapshot.updatedSnapshots,
+              testQuestions: resolvedSnapshot.testQuestions,
             }
           : t
       )
@@ -1730,7 +2140,8 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const resumeExam = () => {
     if (!inProgressSession) return;
-    const foundTest = tests.find((t) => t.id === inProgressSession.testId);
+    const foundTest =
+      inProgressSession.testSnapshot || tests.find((t) => t.id === inProgressSession.testId);
     if (!foundTest) {
       discardExamSession();
       return;
@@ -1943,7 +2354,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     try {
       const res = await fetch('/api/evaluate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify({
           testId: activeTest.id,
           testDefinition: activeTest,
@@ -2058,12 +2472,22 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       targetQuestions = targetQuestions.filter((q) => q.subject === subjectFilter);
     }
 
+    const practiceTestId = generateUniqueTestId('mistake_practice');
     if (targetQuestions.length === 0) {
-      targetQuestions = questions.slice(0, 15);
+      targetQuestions = selectQuestionsIntelligent(accessibleQuestions, {
+        exam: authProfile?.examCategory || 'JEE_MAIN',
+        subject:
+          subjectFilter && subjectFilter !== 'ALL' ? (subjectFilter as any) : undefined,
+        difficulty: 'HARD',
+        count: 15,
+        testIdForTracking: practiceTestId,
+      });
     }
 
+    const testQuestions = buildTestQuestionMappings(practiceTestId, targetQuestions);
     const test: TestDefinition = {
-      id: `mistake-practice-${Date.now()}`,
+      id: practiceTestId,
+      testId: practiceTestId,
       title: 'Mistake Book Revision Sprint',
       subtitle: `Targeted review of ${targetQuestions.length} previously missed questions`,
       examType: authProfile?.examCategory || 'JEE_MAIN',
@@ -2080,6 +2504,8 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       description: 'Strengthen weak areas with step-by-step solutions and instant feedback.',
       published: true,
       questions: targetQuestions,
+      snapshotQuestionIds: targetQuestions.map((q) => q.questionId || q.id),
+      testQuestions,
       createdAt: new Date().toISOString(),
     };
 
@@ -2169,6 +2595,9 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         completeFirstLoginPassword,
         requestPasswordRecovery,
 
+        courses,
+        enrollments,
+        studyMaterials,
         managedUsers,
         batches,
         announcements,
@@ -2180,6 +2609,11 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         createTeacher,
         createStudent,
         updateUserAccount,
+        updateStudentEnrollment,
+        createStudyMaterial,
+        deleteStudyMaterial,
+        fetchRlsSecurityAudit,
+        generateCourseAwareTest,
         deleteUserAccount,
         resetUserPassword,
         revokeUserSessions,
@@ -2206,7 +2640,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
         tests,
         accessibleTests,
-        questions,
+        questions: accessibleQuestions,
         activeTest,
         setActiveTest,
         loadTests,

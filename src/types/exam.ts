@@ -1,5 +1,7 @@
 export type ExamType = 'JEE_MAIN' | 'JEE_ADVANCED' | 'NEET' | 'CUSTOM';
 
+export type CourseType = 'JEE' | 'JEE_ADVANCED' | 'NEET';
+
 export type SubjectName = 'Physics' | 'Chemistry' | 'Mathematics' | 'Botany' | 'Zoology';
 
 export type QuestionType = 'MCQ' | 'NUMERICAL' | 'MULTIPLE_CORRECT' | 'ASSERTION_REASON';
@@ -36,6 +38,8 @@ export interface QuestionUsageRecord {
 export interface Question {
   id: string;
   questionId?: string; // Permanent canonical ID e.g. jee_physics_000001
+  courseId?: string; // 'course_jee' | 'course_jee_adv' | 'course_neet'
+  courseType?: 'JEE' | 'JEE_ADVANCED' | 'NEET';
   exam?: ExamType; // Alias synced with examType
   examType: ExamType;
   subject: SubjectName;
@@ -67,6 +71,8 @@ export interface Question {
   timesCorrect?: number;
   // Question Bank & Rotation tracking fields
   fingerprint?: string;
+  normalizedText?: string;
+  conceptKey?: string;
   timesUsed?: number;
   lastUsedAt?: string | null;
   testIds?: string[];
@@ -104,6 +110,8 @@ export interface ExamPatternSection {
 
 export interface ExamBlueprint {
   id: string;
+  courseId?: string;
+  courseType?: 'JEE' | 'JEE_ADVANCED' | 'NEET';
   exam: ExamType;
   name: string;
   year: string;
@@ -158,10 +166,19 @@ export interface ExamPatternTemplate {
   blueprint?: ExamBlueprint;
 }
 
+export interface TestQuestionMapping {
+  testId: string;
+  questionId: string;
+  questionOrder: number;
+  attemptNumber?: number;
+  setLabel?: string;
+}
+
 export interface TestAttemptSnapshot {
   attemptNumber: number;
   setLabel: string; // e.g. "Set A", "Set B", "Set C"
   questionIds: string[];
+  testQuestions?: TestQuestionMapping[];
   createdAt: string;
 }
 
@@ -177,8 +194,11 @@ export type TestCategoryType =
 
 export interface TestDefinition {
   id: string;
+  testId?: string;
   title: string;
   subtitle: string;
+  courseId?: string; // 'course_jee' | 'course_jee_adv' | 'course_neet'
+  courseType?: 'JEE' | 'JEE_ADVANCED' | 'NEET';
   examType: ExamType;
   testType: TestCategoryType;
   patternYear: number;
@@ -191,16 +211,19 @@ export interface TestDefinition {
   subjects: SubjectName[];
   questionsCount: number;
   difficulty: Difficulty;
+  difficultyDistributionNotice?: string;
   syllabus: string[];
   description: string;
   isAiGenerated?: boolean;
   isOfficialPyq?: boolean;
+  isFixedPaper?: boolean;
   pyqDetails?: PYQMetadata;
   published: boolean;
   sections?: ExamPatternSection[];
   questions: Question[];
-  // Saved Test Snapshot System (Part 5)
+  // Saved Test Snapshot System (Part 5 & Requirement 10)
   snapshotQuestionIds?: string[];
+  testQuestions?: TestQuestionMapping[];
   attemptSnapshots?: TestAttemptSnapshot[];
   activeAttemptSet?: string;
   createdAt: string;
@@ -267,6 +290,8 @@ export interface TestAttemptResult {
   id: string;
   testId: string;
   testTitle: string;
+  courseId?: string;
+  courseType?: 'JEE' | 'JEE_ADVANCED' | 'NEET';
   examType: ExamType;
   testType?: TestCategoryType;
   attemptSetLabel?: string;
@@ -388,6 +413,8 @@ export interface ActiveExamSession {
   testId: string;
   attemptSetLabel?: string;
   snapshotQuestionIds?: string[];
+  testQuestions?: TestQuestionMapping[];
+  testSnapshot?: TestDefinition;
   responses: Record<string, UserExamResponse>;
   timerSecondsLeft: number;
   examStartTime: number;
@@ -396,3 +423,4 @@ export interface ActiveExamSession {
   integrityEvents: ExamIntegrityEvent[];
   lastSavedTimestamp: number;
 }
+

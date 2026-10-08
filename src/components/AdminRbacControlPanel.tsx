@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useExam } from '../context/ExamContext';
-import { AuthProfile, TeacherPermissions } from '../types/auth';
+import { TeacherPermissions, CourseType, EnrollmentStatus } from '../types/auth';
 import { ExamType } from '../types/exam';
 import {
   Users,
@@ -17,8 +17,7 @@ import {
   Settings,
   Check,
   Copy,
-  Lock,
-  AlertTriangle,
+  BookOpen,
 } from 'lucide-react';
 
 export const AdminRbacControlPanel: React.FC = () => {
@@ -31,9 +30,11 @@ export const AdminRbacControlPanel: React.FC = () => {
     announcements,
     recoveryRequests,
     studentIdConfig,
+    enrollments,
     createTeacher,
     createStudent,
     updateUserAccount,
+    updateStudentEnrollment,
     deleteUserAccount,
     resetUserPassword,
     revokeUserSessions,
@@ -46,12 +47,20 @@ export const AdminRbacControlPanel: React.FC = () => {
   } = useExam();
 
   const [subTab, setSubTab] = useState<
-    'users' | 'teachers' | 'students' | 'batches' | 'id-config' | 'announcements' | 'recovery'
-  >('users');
+    | 'enrollments'
+    | 'users'
+    | 'teachers'
+    | 'students'
+    | 'batches'
+    | 'id-config'
+    | 'announcements'
+    | 'recovery'
+  >('enrollments');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | 'ADMIN' | 'TEACHER' | 'STUDENT'>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [courseFilter, setCourseFilter] = useState<string>('ALL');
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
   // Create Teacher Form State
@@ -60,17 +69,22 @@ export const AdminRbacControlPanel: React.FC = () => {
   const [teacherUsername, setTeacherUsername] = useState('');
   const [teacherPassword, setTeacherPassword] = useState('Teacher@2026!');
   const [teacherExam, setTeacherExam] = useState<ExamType>('JEE_MAIN');
+  const [teacherAssignedCourses, setTeacherAssignedCourses] = useState<CourseType[]>(['JEE']);
   const [teacherPerms, setTeacherPerms] = useState<TeacherPermissions>({
     canCreateTests: true,
     canCreateQuestions: true,
+    canUploadQuestions: true,
+    canEditQuestions: true,
     canManageBatches: true,
     canResetStudentPasswords: true,
     canViewAllStudents: false,
+    assignedCourses: ['JEE'],
   });
 
   // Create Student Form State
   const [stuName, setStuName] = useState('');
   const [stuExam, setStuExam] = useState<ExamType>('JEE_MAIN');
+  const [stuIncludeAdv, setStuIncludeAdv] = useState(false);
   const [stuTeacherId, setStuTeacherId] = useState('usr-teacher-hcverma');
   const [stuBatchId, setStuBatchId] = useState('batch-jee-main-2027-m');
   const [stuClass, setStuClass] = useState('Class 12');
@@ -80,6 +94,7 @@ export const AdminRbacControlPanel: React.FC = () => {
     name: string;
     studentId: string;
     tempPass: string;
+    course: string;
   } | null>(null);
   const [copiedSlip, setCopiedSlip] = useState(false);
 
@@ -100,7 +115,8 @@ export const AdminRbacControlPanel: React.FC = () => {
   // Announcement State
   const [annTitle, setAnnTitle] = useState('');
   const [annContent, setAnnContent] = useState('');
-  const [annAudience, setAnnAudience] = useState<'ALL' | 'TEACHERS' | 'STUDENTS'>('ALL');
+  const [annCourse, setAnnCourse] = useState<CourseType | 'ALL'>('JEE');
+  const [annAudience, setAnnAudience] = useState<'ALL' | 'TEACHERS' | 'STUDENTS'>('STUDENTS');
   const [annPriority, setAnnPriority] = useState<'NORMAL' | 'IMPORTANT' | 'URGENT'>('URGENT');
 
   const teachersList = useMemo(
@@ -119,6 +135,11 @@ export const AdminRbacControlPanel: React.FC = () => {
     return managedUsers.filter((u) => {
       if (roleFilter !== 'ALL' && u.role !== roleFilter) return false;
       if (statusFilter !== 'ALL' && u.status !== statusFilter) return false;
+      if (courseFilter !== 'ALL') {
+        const hasCourse =
+          u.courseType === courseFilter || (u.assignedCourses || []).includes(courseFilter as CourseType);
+        if (!hasCourse) return false;
+      }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchName = u.fullName.toLowerCase().includes(q);
@@ -128,11 +149,21 @@ export const AdminRbacControlPanel: React.FC = () => {
       }
       return true;
     });
-  }, [managedUsers, roleFilter, statusFilter, searchQuery]);
+  }, [managedUsers, roleFilter, statusFilter, courseFilter, searchQuery]);
 
   const showToast = (msg: string) => {
     setActionFeedback(msg);
-    setTimeout(() => setActionFeedback(null), 3500);
+    setTimeout(() => setActionFeedback(null), 4000);
+  };
+
+  const toggleTeacherCourseSelection = (course: CourseType) => {
+    setTeacherAssignedCourses((prev) => {
+      const exists = prev.includes(course);
+      const next = exists ? prev.filter((c) => c !== course) : [...prev, course];
+      const finalCourses = next.length > 0 ? next : ([course] as CourseType[]);
+      setTeacherPerms((p) => ({ ...p, assignedCourses: finalCourses }));
+      return finalCourses;
+    });
   };
 
   const handleCreateTeacher = async (e: React.FormEvent) => {
@@ -143,13 +174,19 @@ export const AdminRbacControlPanel: React.FC = () => {
       username: teacherUsername || undefined,
       password: teacherPassword,
       examCategory: teacherExam,
-      teacherPermissions: teacherPerms,
+      assignedCourses: teacherAssignedCourses,
+      teacherPermissions: {
+        ...teacherPerms,
+        assignedCourses: teacherAssignedCourses,
+      },
     });
     if (res.success) {
       setTeacherName('');
       setTeacherEmail('');
       setTeacherUsername('');
-      showToast(`Created teacher account for ${teacherName}`);
+      showToast(
+        `Created teacher account for ${teacherName} assigned to [${teacherAssignedCourses.join(', ')}]`
+      );
     } else {
       showToast(`Error: ${res.error}`);
     }
@@ -157,9 +194,16 @@ export const AdminRbacControlPanel: React.FC = () => {
 
   const handleCreateStudent = async (e: React.FormEvent) => {
     e.preventDefault();
+    const assignedCourses: CourseType[] =
+      stuExam === 'NEET'
+        ? ['NEET']
+        : stuExam === 'JEE_ADVANCED' || stuIncludeAdv
+        ? ['JEE', 'JEE_ADVANCED']
+        : ['JEE'];
     const res = await createStudent({
       fullName: stuName,
       examCategory: stuExam,
+      assignedCourses,
       teacherId: stuTeacherId,
       batchId: stuBatchId || null,
       className: stuClass,
@@ -171,10 +215,58 @@ export const AdminRbacControlPanel: React.FC = () => {
         name: stuName,
         studentId: res.generatedStudentId || '',
         tempPass: res.temporaryPassword || '',
+        course: assignedCourses.join(' + '),
       });
       setStuName('');
       setStuPass('');
-      showToast(`Generated unique Student ID ${res.generatedStudentId}`);
+      showToast(
+        `Enrolled ${stuName} in ${assignedCourses.join(' + ')} (Student ID: ${res.generatedStudentId})`
+      );
+    } else {
+      showToast(`Error: ${res.error}`);
+    }
+  };
+
+  const handleQuickCourseSwitch = async (
+    studentId: string,
+    studentName: string,
+    selection: 'JEE' | 'JEE_BOTH' | 'NEET',
+    currentStatus: EnrollmentStatus
+  ) => {
+    const courseType: CourseType = selection === 'NEET' ? 'NEET' : 'JEE';
+    const includeJeeAdvanced = selection === 'JEE_BOTH';
+    const res = await updateStudentEnrollment({
+      studentId,
+      courseType,
+      enrollmentStatus: currentStatus || 'ACTIVE',
+      includeJeeAdvanced,
+    });
+    if (res.success) {
+      showToast(
+        `Updated ${studentName}'s course enrollment to ${
+          includeJeeAdvanced ? 'JEE + JEE Advanced' : courseType
+        }. All permissions & dashboard updated automatically!`
+      );
+    } else {
+      showToast(`Error: ${res.error}`);
+    }
+  };
+
+  const handleQuickEnrollmentStatus = async (
+    studentId: string,
+    studentName: string,
+    courseType: CourseType,
+    includeJeeAdvanced: boolean,
+    nextStatus: EnrollmentStatus
+  ) => {
+    const res = await updateStudentEnrollment({
+      studentId,
+      courseType,
+      enrollmentStatus: nextStatus,
+      includeJeeAdvanced,
+    });
+    if (res.success) {
+      showToast(`${studentName}'s course enrollment is now ${nextStatus}.`);
     } else {
       showToast(`Error: ${res.error}`);
     }
@@ -184,61 +276,48 @@ export const AdminRbacControlPanel: React.FC = () => {
     <div className="space-y-6">
       {/* Platform-Wide Enterprise Metrics Row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
           <div className="text-[11px] text-slate-500 font-semibold">Total Students</div>
-          <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
-            {studentsList.length}
-          </div>
+          <div className="text-xl font-black text-slate-900 mt-0.5">{studentsList.length}</div>
           <div className="text-[10px] text-emerald-600">{activeStudentsCount} Active</div>
         </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-          <div className="text-[11px] text-slate-500 font-semibold">Total Teachers</div>
-          <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
-            {teachersList.length}
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
+          <div className="text-[11px] text-slate-500 font-semibold">JEE Enrolled</div>
+          <div className="text-xl font-black text-indigo-600 mt-0.5">
+            {studentsList.filter((s) => (s.assignedCourses || []).includes('JEE')).length}
           </div>
+          <div className="text-[10px] text-slate-500">Main &amp; Adv</div>
+        </div>
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
+          <div className="text-[11px] text-slate-500 font-semibold">NEET Enrolled</div>
+          <div className="text-xl font-black text-emerald-600 mt-0.5">
+            {studentsList.filter((s) => s.courseType === 'NEET').length}
+          </div>
+          <div className="text-[10px] text-slate-500">Medical UG</div>
+        </div>
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
+          <div className="text-[11px] text-slate-500 font-semibold">Total Teachers</div>
+          <div className="text-xl font-black text-slate-900 mt-0.5">{teachersList.length}</div>
           <div className="text-[10px] text-emerald-600">{activeTeachersCount} Active</div>
         </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
           <div className="text-[11px] text-slate-500 font-semibold">Active Batches</div>
-          <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
-            {batches.length}
-          </div>
-          <div className="text-[10px] text-indigo-600">JEE &amp; NEET</div>
+          <div className="text-xl font-black text-slate-900 mt-0.5">{batches.length}</div>
+          <div className="text-[10px] text-indigo-600">Course Scoped</div>
         </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
           <div className="text-[11px] text-slate-500 font-semibold">Mock Tests</div>
-          <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
-            {tests.length}
-          </div>
+          <div className="text-xl font-black text-slate-900 mt-0.5">{tests.length}</div>
           <div className="text-[10px] text-slate-500">Published CBT</div>
         </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
           <div className="text-[11px] text-slate-500 font-semibold">Question Bank</div>
-          <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
+          <div className="text-xl font-black text-slate-900 mt-0.5">
             {totalQuestionsInBank.toLocaleString()}
           </div>
-          <div className="text-[10px] text-slate-500">PostgreSQL Indexed</div>
+          <div className="text-[10px] text-slate-500">Course Tagged</div>
         </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-          <div className="text-[11px] text-slate-500 font-semibold">Total Attempts</div>
-          <div className="text-xl font-black text-slate-900 dark:text-white mt-0.5">
-            {allAttempts.length}
-          </div>
-          <div className="text-[10px] text-slate-500">All Candidates</div>
-        </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-          <div className="text-[11px] text-slate-500 font-semibold">Completed Today</div>
-          <div className="text-xl font-black text-indigo-600 dark:text-indigo-400 mt-0.5">
-            {
-              allAttempts.filter(
-                (a) =>
-                  new Date(a.submittedAt).toDateString() === new Date().toDateString()
-              ).length
-            }
-          </div>
-          <div className="text-[10px] text-slate-500">Live Sessions</div>
-        </div>
-        <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+        <div className="p-3.5 rounded-2xl bg-white border border-slate-200">
           <div className="text-[11px] text-slate-500 font-semibold">Reset Tickets</div>
           <div className="text-xl font-black text-amber-600 mt-0.5">
             {recoveryRequests.filter((r) => r.status === 'PENDING').length}
@@ -248,99 +327,205 @@ export const AdminRbacControlPanel: React.FC = () => {
       </div>
 
       {actionFeedback && (
-        <div className="p-3.5 rounded-2xl bg-indigo-950 text-indigo-200 border border-indigo-700 text-xs font-bold flex items-center justify-between">
-          <span>{actionFeedback}</span>
-          <button
-            type="button"
-            onClick={() => setActionFeedback(null)}
-            className="text-indigo-400 hover:text-white cursor-pointer"
-          >
-            Dismiss
+        <div className="p-3.5 rounded-2xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-between shadow-lg">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 shrink-0" />
+            <span>{actionFeedback}</span>
+          </div>
+          <button onClick={() => setActionFeedback(null)} className="text-white/80 hover:text-white">
+            ✕
           </button>
         </div>
       )}
 
-      {/* Sub-Navigation Bar */}
-      <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-slate-200/70 dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
+      {/* Sub-navigation */}
+      <div className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200">
         {[
-          { id: 'users', label: `All Users & Sessions (${managedUsers.length})` },
-          { id: 'teachers', label: `Teachers & Permissions (${teachersList.length})` },
-          { id: 'students', label: `Student IDs & Enrollment (${studentsList.length})` },
-          { id: 'batches', label: `Classes & Batches (${batches.length})` },
-          { id: 'id-config', label: 'Student ID Prefix Config' },
-          { id: 'announcements', label: `Announcements (${announcements.length})` },
+          { id: 'enrollments', label: `Course Enrollments (${enrollments.length})`, icon: BookOpen },
+          { id: 'students', label: 'Create & Enroll Student', icon: GraduationCap },
+          { id: 'teachers', label: 'Teachers & Course Access', icon: UserCheck },
+          { id: 'users', label: 'All Accounts Directory', icon: Users },
+          { id: 'batches', label: 'Batches & Classes', icon: Layers },
+          { id: 'id-config', label: 'Student ID Generator', icon: Settings },
+          { id: 'announcements', label: 'Course Announcements', icon: Bell },
           {
             id: 'recovery',
-            label: `Password Recovery (${
-              recoveryRequests.filter((r) => r.status === 'PENDING').length
-            })`,
+            label: `Password Recovery (${recoveryRequests.filter((r) => r.status === 'PENDING').length})`,
+            icon: KeyRound,
           },
-        ].map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => setSubTab(item.id as any)}
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-              subTab === item.id
-                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
+        ].map((t) => {
+          const Icon = t.icon;
+          const active = subTab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setSubTab(t.id as any)}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                active
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
-      {/* Generated Student Credential Slip */}
-      {generatedSlip && (
-        <div className="p-5 rounded-3xl bg-indigo-950 text-white border-2 border-indigo-500 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <div className="text-xs font-mono text-indigo-300 uppercase">
-              New Student ID Provisioned
+      {/* ================= SUBTAB: COURSE ENROLLMENTS MANAGEMENT (SECTION 17) ================= */}
+      {subTab === 'enrollments' && (
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 space-y-5 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+            <div>
+              <h3 className="text-lg font-black text-slate-900">
+                Student Course Enrollment Management (JEE / JEE Advanced / NEET)
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Assign, switch (`JEE ↔ NEET`), suspend, or reactivate student enrollments. Changing a student&apos;s course immediately updates their API permissions, dashboard, question bank, and mock test access.
+              </p>
             </div>
-            <div className="text-base font-black mt-0.5">
-              {generatedSlip.name} · ID:{' '}
-              <span className="font-mono text-emerald-400">{generatedSlip.studentId}</span> ·
-              Temp Password:{' '}
-              <span className="font-mono text-amber-300">{generatedSlip.tempPass}</span>
-            </div>
+            <button
+              onClick={() => setSubTab('students')}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <UserPlus className="w-4 h-4" /> Create &amp; Enroll Student
+            </button>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard.writeText(
-                  `Student ID: ${generatedSlip.studentId}\nTemporary Password: ${generatedSlip.tempPass}`
-                );
-                setCopiedSlip(true);
-                setTimeout(() => setCopiedSlip(false), 2000);
-              }}
-              className="px-3.5 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-            >
-              {copiedSlip ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              <span>{copiedSlip ? 'Copied' : 'Copy Credentials'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setGeneratedSlip(null)}
-              className="px-3 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold cursor-pointer"
-            >
-              Close
-            </button>
+
+          <div className="overflow-x-auto rounded-2xl border border-slate-200">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                <tr>
+                  <th className="py-3 px-4">Student Name</th>
+                  <th className="py-3 px-4">Student ID</th>
+                  <th className="py-3 px-4">Active Course Enrollment</th>
+                  <th className="py-3 px-4">Enrollment Status</th>
+                  <th className="py-3 px-4">Change Course (Instant Re-Provision)</th>
+                  <th className="py-3 px-4 text-right">Suspend / Reactivate</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {studentsList.map((stu) => {
+                  const hasAdv = (stu.assignedCourses || []).includes('JEE_ADVANCED');
+                  const currentSelectValue =
+                    stu.courseType === 'NEET'
+                      ? 'NEET'
+                      : hasAdv
+                      ? 'JEE_BOTH'
+                      : 'JEE';
+                  const isSuspended = stu.enrollmentStatus === 'SUSPENDED' || stu.status === 'SUSPENDED';
+
+                  return (
+                    <tr key={stu.id} className="hover:bg-slate-50/80">
+                      <td className="py-3.5 px-4">
+                        <div className="font-bold text-slate-900">{stu.fullName}</div>
+                        <div className="text-[11px] text-slate-500">{stu.className || 'Class 12'}</div>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span className="px-2.5 py-1 rounded-lg bg-slate-100 font-mono font-bold text-slate-800 border border-slate-200">
+                          {stu.studentId}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <div className="flex flex-wrap gap-1.5">
+                          {(stu.assignedCourses || [stu.courseType]).map((c) => (
+                            <span
+                              key={c}
+                              className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                                c === 'NEET'
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : c === 'JEE_ADVANCED'
+                                  ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                  : 'bg-indigo-100 text-indigo-800 border border-indigo-300'
+                              }`}
+                            >
+                              {c === 'JEE' ? 'JEE (Main)' : c === 'JEE_ADVANCED' ? 'JEE Advanced' : 'NEET UG'}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span
+                          className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            !isSuspended
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {isSuspended ? 'SUSPENDED' : stu.enrollmentStatus || 'ACTIVE'}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <select
+                          value={currentSelectValue}
+                          onChange={(e) =>
+                            handleQuickCourseSwitch(
+                              stu.id,
+                              stu.fullName,
+                              e.target.value as 'JEE' | 'JEE_BOTH' | 'NEET',
+                              stu.enrollmentStatus || 'ACTIVE'
+                            )
+                          }
+                          className="py-1.5 px-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 cursor-pointer"
+                        >
+                          <option value="JEE">Course: JEE (Main Only)</option>
+                          <option value="JEE_BOTH">Course: JEE + JEE Advanced</option>
+                          <option value="NEET">Course: NEET UG</option>
+                        </select>
+                      </td>
+                      <td className="py-3.5 px-4 text-right">
+                        {isSuspended ? (
+                          <button
+                            onClick={() =>
+                              handleQuickEnrollmentStatus(
+                                stu.id,
+                                stu.fullName,
+                                stu.courseType === 'NEET' ? 'NEET' : 'JEE',
+                                hasAdv,
+                                'ACTIVE'
+                              )
+                            }
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold cursor-pointer"
+                          >
+                            Reactivate Enrollment
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() =>
+                              handleQuickEnrollmentStatus(
+                                stu.id,
+                                stu.fullName,
+                                stu.courseType === 'NEET' ? 'NEET' : 'JEE',
+                                hasAdv,
+                                'SUSPENDED'
+                              )
+                            }
+                            className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold cursor-pointer"
+                          >
+                            Suspend Enrollment
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {/* SUBTAB 1: ALL REGISTERED USERS, STATUS & SESSION REVOCATION */}
+      {/* ================= SUBTAB: ALL USERS DIRECTORY ================= */}
       {subTab === 'users' && (
-        <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 space-y-5 shadow-xs">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div>
-              <h3 className="text-base font-black text-slate-900 dark:text-white">
-                Platform User Directory &amp; Session Control
+              <h3 className="text-lg font-black text-slate-900">
+                Master Accounts &amp; Role Access Directory
               </h3>
               <p className="text-xs text-slate-500">
-                Search, filter, suspend/reactivate accounts, reset credentials, or force-logout active sessions.
+                Manage credentials, account status, and session security across all roles.
               </p>
             </div>
 
@@ -352,14 +537,14 @@ export const AdminRbacControlPanel: React.FC = () => {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search name, Student ID, email..."
-                  className="pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  className="pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-xs"
                 />
               </div>
 
               <select
                 value={roleFilter}
                 onChange={(e) => setRoleFilter(e.target.value as any)}
-                className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
+                className="py-1.5 px-3 rounded-xl border border-slate-200 bg-slate-50 text-xs font-bold"
               >
                 <option value="ALL">All Roles</option>
                 <option value="ADMIN">Admins</option>
@@ -368,425 +553,272 @@ export const AdminRbacControlPanel: React.FC = () => {
               </select>
 
               <select
+                value={courseFilter}
+                onChange={(e) => setCourseFilter(e.target.value)}
+                className="py-1.5 px-3 rounded-xl border border-slate-200 bg-slate-50 text-xs font-bold"
+              >
+                <option value="ALL">All Courses</option>
+                <option value="JEE">JEE</option>
+                <option value="JEE_ADVANCED">JEE Advanced</option>
+                <option value="NEET">NEET</option>
+              </select>
+
+              <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
+                className="py-1.5 px-3 rounded-xl border border-slate-200 bg-slate-50 text-xs font-bold"
               >
                 <option value="ALL">All Statuses</option>
-                <option value="ACTIVE">ACTIVE</option>
-                <option value="SUSPENDED">SUSPENDED</option>
-                <option value="DEACTIVATED">DEACTIVATED</option>
-                <option value="PENDING">PENDING</option>
+                <option value="ACTIVE">Active</option>
+                <option value="SUSPENDED">Suspended</option>
+                <option value="DISABLED">Disabled</option>
               </select>
             </div>
           </div>
 
-          <div className="divide-y divide-slate-100 dark:divide-slate-800">
-            {filteredUsers.map((user) => (
-              <div
-                key={user.id}
-                className="py-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
-              >
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs font-black text-indigo-600 dark:text-indigo-400">
-                      [{user.role}]
-                    </span>
-                    <span className="text-sm font-bold text-slate-900 dark:text-white">
-                      {user.fullName}
-                    </span>
-                    {user.studentId && (
-                      <span className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
-                        · ID: {user.studentId}
+          <div className="overflow-x-auto rounded-2xl border border-slate-200">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                <tr>
+                  <th className="py-3 px-4">User</th>
+                  <th className="py-3 px-4">Role</th>
+                  <th className="py-3 px-4">Login Identifier</th>
+                  <th className="py-3 px-4">Authorized Course(s)</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {filteredUsers.map((u) => (
+                  <tr key={u.id} className="hover:bg-slate-50/70">
+                    <td className="py-3 px-4 font-bold text-slate-900">{u.fullName}</td>
+                    <td className="py-3 px-4">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                          u.role === 'ADMIN'
+                            ? 'bg-purple-100 text-purple-800'
+                            : u.role === 'TEACHER'
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-indigo-100 text-indigo-800'
+                        }`}
+                      >
+                        {u.role}
                       </span>
-                    )}
-                    <span className="text-xs text-slate-500">
-                      · Status: <strong>{user.status}</strong>
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    {user.email} · {user.examCategory.replace('_', ' ')}
-                    {user.teacherName && ` · Mentor: ${user.teacherName}`}
-                    {user.batchName && ` · Batch: ${user.batchName}`}
-                    {` · Active Sessions: ${user.activeSessionsCount || 0}`}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <select
-                    value={user.status}
-                    onChange={async (e) => {
-                      await updateUserAccount(user.id, { status: e.target.value });
-                      showToast(`Updated ${user.fullName} status to ${e.target.value}`);
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                  >
-                    <option value="ACTIVE">ACTIVE</option>
-                    <option value="SUSPENDED">SUSPENDED</option>
-                    <option value="DEACTIVATED">DEACTIVATED</option>
-                    <option value="PENDING">PENDING</option>
-                  </select>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const newTmp = `Reset@${Math.floor(1000 + Math.random() * 9000)}`;
-                      await resetUserPassword(user.id, newTmp, true);
-                      setGeneratedSlip({
-                        name: user.fullName,
-                        studentId: user.studentId || user.email || '',
-                        tempPass: newTmp,
-                      });
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-300 text-xs font-semibold cursor-pointer"
-                  >
-                    Reset Credentials
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const res = await revokeUserSessions(user.id);
-                      showToast(
-                        `Force-logged out ${user.fullName} (${res.revokedCount || 0} sessions revoked)`
-                      );
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 text-xs font-semibold flex items-center gap-1 cursor-pointer"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Force Logout</span>
-                  </button>
-
-                  {user.role !== 'ADMIN' && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await deleteUserAccount(user.id);
-                        showToast(`Deleted user ${user.fullName}`);
-                      }}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 cursor-pointer"
-                      title="Delete account"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
+                    </td>
+                    <td className="py-3 px-4 font-mono text-slate-700">
+                      {u.role === 'STUDENT' ? u.studentId : u.email}
+                    </td>
+                    <td className="py-3 px-4 font-mono font-bold text-slate-800">
+                      {u.role === 'ADMIN'
+                        ? 'ALL (JEE, JEE_ADV, NEET)'
+                        : (u.assignedCourses || [u.courseType]).join(', ')}
+                    </td>
+                    <td className="py-3 px-4">
+                      <select
+                        value={u.status}
+                        disabled={u.role === 'ADMIN'}
+                        onChange={async (e) => {
+                          const nextStatus = e.target.value as any;
+                          await updateUserAccount(u.id, { status: nextStatus });
+                          showToast(`Updated ${u.fullName} status to ${nextStatus}`);
+                        }}
+                        className="py-1 px-2 rounded-lg border border-slate-200 text-[11px] font-bold bg-white"
+                      >
+                        <option value="ACTIVE">ACTIVE</option>
+                        <option value="SUSPENDED">SUSPENDED</option>
+                        <option value="DISABLED">DISABLED</option>
+                        <option value="EXPIRED">EXPIRED</option>
+                      </select>
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={async () => {
+                            const temp =
+                              u.role === 'STUDENT' ? 'Welcome@123' : 'Teacher@2026!';
+                            await resetUserPassword(u.id, temp, true);
+                            showToast(
+                              `Reset password for ${u.fullName} to "${temp}" (Must change on next login)`
+                            );
+                          }}
+                          className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 cursor-pointer"
+                          title="Reset Password"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const c = await revokeUserSessions(u.id);
+                            showToast(`Revoked ${c} active session(s) for ${u.fullName}`);
+                          }}
+                          className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-amber-600 cursor-pointer"
+                          title="Force Logout Sessions"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                        </button>
+                        {u.role !== 'ADMIN' && (
+                          <button
+                            onClick={async () => {
+                              await deleteUserAccount(u.id);
+                              showToast(`Deleted user ${u.fullName}`);
+                            }}
+                            className="p-1.5 rounded-lg border border-slate-200 hover:bg-rose-50 text-rose-600 cursor-pointer"
+                            title="Delete Account"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {/* SUBTAB 2: CREATE & MANAGE TEACHERS & PERMISSIONS */}
+      {/* ================= SUBTAB: TEACHERS & COURSE PERMISSIONS (SECTION 15) ================= */}
       {subTab === 'teachers' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-5">
-            <form
-              onSubmit={handleCreateTeacher}
-              className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4"
-            >
-              <h3 className="text-lg font-black text-slate-900 dark:text-white">
-                Create / Invite Teacher Account
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <form
+            onSubmit={handleCreateTeacher}
+            className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4 shadow-xs"
+          >
+            <div>
+              <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-indigo-600" />
+                Create Teacher &amp; Assign Course
               </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Teachers only receive access to the courses (JEE, JEE Advanced, or NEET) assigned to them.
+              </p>
+            </div>
+
+            <div className="space-y-3">
               <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                  Faculty Full Name *
+                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                  Full Name
                 </label>
                 <input
                   type="text"
+                  required
                   value={teacherName}
                   onChange={(e) => setTeacherName(e.target.value)}
-                  placeholder="e.g. Prof. S.K. Mishra (HOD Mathematics)"
-                  required
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  placeholder="e.g. Prof. S.K. Mishra"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
                 />
               </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                    Official Email *
-                  </label>
-                  <input
-                    type="email"
-                    value={teacherEmail}
-                    onChange={(e) => setTeacherEmail(e.target.value)}
-                    placeholder="skmishra@ntapulse.edu.in"
-                    required
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                    Username
-                  </label>
-                  <input
-                    type="text"
-                    value={teacherUsername}
-                    onChange={(e) => setTeacherUsername(e.target.value)}
-                    placeholder="skmishra"
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                    Initial Password *
-                  </label>
-                  <input
-                    type="text"
-                    value={teacherPassword}
-                    onChange={(e) => setTeacherPassword(e.target.value)}
-                    required
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                    Primary Exam Wing
-                  </label>
-                  <select
-                    value={teacherExam}
-                    onChange={(e) => setTeacherExam(e.target.value as ExamType)}
-                    className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                  >
-                    <option value="JEE_MAIN">JEE Main</option>
-                    <option value="JEE_ADVANCED">JEE Advanced</option>
-                    <option value="NEET">NEET UG</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2">
-                <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                  Teacher Role Permissions
-                </div>
-                {[
-                  { key: 'canCreateTests', label: 'Can Create & Assign Mock Tests' },
-                  { key: 'canCreateQuestions', label: 'Can Add/Edit Question Bank' },
-                  { key: 'canManageBatches', label: 'Can Create & Manage Batches' },
-                  { key: 'canResetStudentPasswords', label: 'Can Reset Student Passwords' },
-                  {
-                    key: 'canViewAllStudents',
-                    label: 'Elevated Access: View All Platform Students',
-                  },
-                ].map((perm) => (
-                  <label
-                    key={perm.key}
-                    className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={(teacherPerms as any)[perm.key]}
-                      onChange={(e) =>
-                        setTeacherPerms((p) => ({ ...p, [perm.key]: e.target.checked }))
-                      }
-                    />
-                    <span>{perm.label}</span>
-                  </label>
-                ))}
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs uppercase tracking-wider cursor-pointer"
-              >
-                Provision Teacher Account
-              </button>
-            </form>
-          </div>
-
-          <div className="lg:col-span-7 space-y-4">
-            {teachersList.map((teacher) => (
-              <div
-                key={teacher.id}
-                className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-3"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-sm font-black text-slate-900 dark:text-white">
-                      {teacher.fullName}
-                    </div>
-                    <div className="text-xs text-slate-500 font-mono">
-                      Email: {teacher.email} · Username: {teacher.username} · Wing:{' '}
-                      {teacher.examCategory} · Status: {teacher.status}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateUserAccount(teacher.id, {
-                        teacherPermissions: {
-                          ...teacher.teacherPermissions,
-                          canViewAllStudents: !teacher.teacherPermissions.canViewAllStudents,
-                        },
-                      })
-                    }
-                    className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-bold cursor-pointer"
-                  >
-                    {teacher.teacherPermissions.canViewAllStudents
-                      ? 'Scope: All Students (Elevated)'
-                      : 'Scope: Assigned Students Only'}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* SUBTAB 3: ADMIN STUDENT ENROLLMENT & TEACHER/BATCH ASSIGNMENT */}
-      {subTab === 'students' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-5">
-            <form
-              onSubmit={handleCreateStudent}
-              className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4"
-            >
-              <h3 className="text-lg font-black text-slate-900 dark:text-white">
-                Create Student &amp; Assign Faculty / Batch
-              </h3>
               <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                  Student Full Name *
+                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                  Official Email
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={teacherEmail}
+                  onChange={(e) => setTeacherEmail(e.target.value)}
+                  placeholder="skmishra@ntapulse.edu.in"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                  Initial Password
                 </label>
                 <input
                   type="text"
-                  value={stuName}
-                  onChange={(e) => setStuName(e.target.value)}
-                  placeholder="e.g. Kriti Sanon"
                   required
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  value={teacherPassword}
+                  onChange={(e) => setTeacherPassword(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                    Exam Category
-                  </label>
-                  <select
-                    value={stuExam}
-                    onChange={(e) => setStuExam(e.target.value as ExamType)}
-                    className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                  >
-                    <option value="JEE_MAIN">JEE Main</option>
-                    <option value="JEE_ADVANCED">JEE Advanced</option>
-                    <option value="NEET">NEET UG</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                    ID Format
-                  </label>
-                  <select
-                    value={stuFormat}
-                    onChange={(e) => setStuFormat(e.target.value as any)}
-                    className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                  >
-                    <option value="SEQUENTIAL">Sequential (JEE26-10004)</option>
-                    <option value="ALPHANUMERIC">Alphanumeric (JEE26-7F42K)</option>
-                  </select>
+              <div>
+                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1.5">
+                  Assigned Courses (Teacher Course Scope)
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {(['JEE', 'JEE_ADVANCED', 'NEET'] as CourseType[]).map((c) => {
+                    const active = teacherAssignedCourses.includes(c);
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => toggleTeacherCourseSelection(c)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                          active
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-slate-50 text-slate-600 border-slate-200'
+                        }`}
+                      >
+                        {c}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
+            </div>
 
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                  Assign Teacher Mentor
-                </label>
-                <select
-                  value={stuTeacherId}
-                  onChange={(e) => setStuTeacherId(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                >
-                  {teachersList.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.fullName}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer"
+            >
+              Provision Teacher Account
+            </button>
+          </form>
 
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-1">
-                  Assign Class / Batch
-                </label>
-                <select
-                  value={stuBatchId}
-                  onChange={(e) => setStuBatchId(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-                >
-                  <option value="">-- No Batch --</option>
-                  {batches.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs uppercase tracking-wider cursor-pointer"
-              >
-                Create Student &amp; Generate Unique Student ID
-              </button>
-            </form>
-          </div>
-
-          <div className="lg:col-span-7 bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4">
-            <h3 className="text-base font-black text-slate-900 dark:text-white">
-              Student-to-Teacher &amp; Batch Assignment Matrix
+          <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 p-6 space-y-4 shadow-xs">
+            <h3 className="text-base font-black text-slate-900">
+              Faculty Directory &amp; Course Assignments ({teachersList.length})
             </h3>
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {studentsList.map((s) => (
+            <div className="space-y-3">
+              {teachersList.map((t) => (
                 <div
-                  key={s.id}
-                  className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  key={t.id}
+                  className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 space-y-3"
                 >
-                  <div>
-                    <div className="text-sm font-bold text-slate-900 dark:text-white">
-                      <span className="font-mono text-indigo-600 dark:text-indigo-400 mr-2">
-                        {s.studentId}
-                      </span>
-                      {s.fullName}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <div className="font-bold text-sm text-slate-900">{t.fullName}</div>
+                      <div className="text-xs text-slate-500 font-mono">{t.email}</div>
                     </div>
-                    <div className="text-xs text-slate-500">
-                      {s.examCategory} · {s.status}
+                    <div className="flex items-center gap-1.5">
+                      {(['JEE', 'JEE_ADVANCED', 'NEET'] as CourseType[]).map((c) => {
+                        const hasCourse = (t.assignedCourses || []).includes(c);
+                        return (
+                          <button
+                            key={c}
+                            onClick={async () => {
+                              const current = t.assignedCourses || [];
+                              const next = hasCourse
+                                ? current.filter((item) => item !== c)
+                                : [...current, c];
+                              if (next.length === 0) return;
+                              await updateUserAccount(t.id, {
+                                assignedCourses: next,
+                                courseType: next[0],
+                                teacherPermissions: {
+                                  ...t.teacherPermissions,
+                                  assignedCourses: next,
+                                },
+                              });
+                              showToast(
+                                `Updated ${t.fullName}'s assigned courses to [${next.join(', ')}]`
+                              );
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase border cursor-pointer ${
+                              hasCourse
+                                ? 'bg-indigo-600 text-white border-indigo-600'
+                                : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            {c}
+                          </button>
+                        );
+                      })}
                     </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <select
-                      value={s.teacherId || ''}
-                      onChange={(e) =>
-                        updateUserAccount(s.id, { teacherId: e.target.value || null })
-                      }
-                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                    >
-                      <option value="">-- Unassigned Teacher --</option>
-                      {teachersList.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.fullName.split('(')[0]}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={s.batchId || ''}
-                      onChange={(e) =>
-                        updateUserAccount(s.id, { batchId: e.target.value || null })
-                      }
-                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-                    >
-                      <option value="">-- Unassigned Batch --</option>
-                      {batches.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name}
-                        </option>
-                      ))}
-                    </select>
                   </div>
                 </div>
               ))}
@@ -795,84 +827,260 @@ export const AdminRbacControlPanel: React.FC = () => {
         </div>
       )}
 
-      {/* SUBTAB 4: BATCHES */}
+      {/* ================= SUBTAB: CREATE & ENROLL STUDENT ================= */}
+      {subTab === 'students' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <form
+            onSubmit={handleCreateStudent}
+            className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4 shadow-xs"
+          >
+            <div>
+              <h3 className="text-base font-black text-slate-900">
+                Create Student &amp; Assign Course Enrollment
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Generates a unique Student ID (`JEE26-...` or `NEET26-...`) linked directly to their enrolled course.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                  Student Full Name
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={stuName}
+                  onChange={(e) => setStuName(e.target.value)}
+                  placeholder="e.g. Rohan Sharma"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                    Enrolled Course
+                  </label>
+                  <select
+                    value={stuExam}
+                    onChange={(e) => setStuExam(e.target.value as ExamType)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
+                  >
+                    <option value="JEE_MAIN">Course: JEE (Main)</option>
+                    <option value="JEE_ADVANCED">Course: JEE + JEE Advanced</option>
+                    <option value="NEET">Course: NEET UG</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                    Class / Cohort
+                  </label>
+                  <select
+                    value={stuClass}
+                    onChange={(e) => setStuClass(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
+                  >
+                    <option value="Class 11">Class 11</option>
+                    <option value="Class 12">Class 12</option>
+                    <option value="Dropper / Repeater">Dropper / Repeater</option>
+                  </select>
+                </div>
+              </div>
+
+              {stuExam === 'JEE_MAIN' && (
+                <label className="flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={stuIncludeAdv}
+                    onChange={(e) => setStuIncludeAdv(e.target.checked)}
+                    className="rounded text-indigo-600"
+                  />
+                  Also enroll in JEE Advanced course content
+                </label>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                    Assign Faculty Mentor
+                  </label>
+                  <select
+                    value={stuTeacherId}
+                    onChange={(e) => setStuTeacherId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
+                  >
+                    {teachersList.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.fullName} ({(t.assignedCourses || []).join('/')})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                    Student ID Format
+                  </label>
+                  <select
+                    value={stuFormat}
+                    onChange={(e) => setStuFormat(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
+                  >
+                    <option value="SEQUENTIAL">Sequential (e.g. JEE26-10004)</option>
+                    <option value="ALPHANUMERIC">Alphanumeric (e.g. JEE26-9X2K1)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase text-slate-500 mb-1">
+                  Optional Custom Temporary Password
+                </label>
+                <input
+                  type="text"
+                  value={stuPass}
+                  onChange={(e) => setStuPass(e.target.value)}
+                  placeholder="Leave blank to auto-generate"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer"
+            >
+              Generate Student ID &amp; Activate Course Enrollment
+            </button>
+          </form>
+
+          {generatedSlip && (
+            <div className="bg-slate-900 text-white rounded-3xl p-6 space-y-4 flex flex-col justify-between">
+              <div className="space-y-3">
+                <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-black uppercase tracking-wider">
+                  New Student Credential Slip
+                </span>
+                <h4 className="text-lg font-black">{generatedSlip.name}</h4>
+                <div className="p-4 rounded-2xl bg-slate-800/90 border border-slate-700 space-y-2 font-mono text-xs">
+                  <div>
+                    <span className="text-slate-400">Student ID: </span>
+                    <strong className="text-emerald-400 text-sm">{generatedSlip.studentId}</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Enrolled Course: </span>
+                    <strong className="text-indigo-300">{generatedSlip.course}</strong>
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Temporary Password: </span>
+                    <strong className="text-amber-300">{generatedSlip.tempPass}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(
+                    `Student ID: ${generatedSlip.studentId} | Course: ${generatedSlip.course} | Temp Password: ${generatedSlip.tempPass}`
+                  );
+                  setCopiedSlip(true);
+                  setTimeout(() => setCopiedSlip(false), 2500);
+                }}
+                className="w-full py-2.5 bg-white text-slate-900 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                {copiedSlip ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                {copiedSlip ? 'Copied Credentials!' : 'Copy Credential Slip'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ================= SUBTAB: BATCHES & CLASSES ================= */}
       {subTab === 'batches' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-5">
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                await createBatch({
-                  name: batchName,
-                  description: batchDesc,
-                  examCategory: batchExam,
-                  className: 'Class 12',
-                  teacherId: batchTeacherId,
-                });
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const ok = await createBatch({
+                name: batchName,
+                description: batchDesc,
+                examCategory: batchExam,
+                teacherId: batchTeacherId,
+              });
+              if (ok) {
                 setBatchName('');
                 setBatchDesc('');
-                showToast('Batch created');
-              }}
-              className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4"
+                showToast('Created new academic batch');
+              }
+            }}
+            className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4 shadow-xs"
+          >
+            <h3 className="text-base font-black text-slate-900">Create Academic Batch</h3>
+            <input
+              type="text"
+              required
+              value={batchName}
+              onChange={(e) => setBatchName(e.target.value)}
+              placeholder="Batch Name (e.g. JEE 2026 Evening Batch)"
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+            />
+            <select
+              value={batchExam}
+              onChange={(e) => setBatchExam(e.target.value as ExamType)}
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
             >
-              <h3 className="text-lg font-black text-slate-900 dark:text-white">
-                Create Platform Batch
-              </h3>
-              <input
-                type="text"
-                value={batchName}
-                onChange={(e) => setBatchName(e.target.value)}
-                placeholder="e.g. JEE Main 2027 Evening Batch"
-                required
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-              />
-              <select
-                value={batchTeacherId}
-                onChange={(e) => setBatchTeacherId(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-              >
-                {teachersList.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.fullName}
-                  </option>
-                ))}
-              </select>
-              <textarea
-                rows={3}
-                value={batchDesc}
-                onChange={(e) => setBatchDesc(e.target.value)}
-                placeholder="Batch description..."
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-              />
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-indigo-600 text-white font-black text-xs uppercase tracking-wider cursor-pointer"
-              >
-                Create Batch
-              </button>
-            </form>
-          </div>
-          <div className="lg:col-span-7 space-y-3">
+              <option value="JEE_MAIN">JEE (Main)</option>
+              <option value="JEE_ADVANCED">JEE Advanced</option>
+              <option value="NEET">NEET UG</option>
+            </select>
+            <select
+              value={batchTeacherId}
+              onChange={(e) => setBatchTeacherId(e.target.value)}
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
+            >
+              {teachersList.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.fullName}
+                </option>
+              ))}
+            </select>
+            <textarea
+              rows={2}
+              value={batchDesc}
+              onChange={(e) => setBatchDesc(e.target.value)}
+              placeholder="Batch schedule and notes..."
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+            />
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl cursor-pointer"
+            >
+              Create Batch
+            </button>
+          </form>
+
+          <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 p-6 space-y-3 shadow-xs">
+            <h3 className="text-base font-black text-slate-900">Active Batches ({batches.length})</h3>
             {batches.map((b) => (
               <div
                 key={b.id}
-                className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 flex items-center justify-between"
+                className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 flex items-center justify-between"
               >
                 <div>
-                  <div className="text-sm font-black text-slate-900 dark:text-white">
-                    {b.name}
-                  </div>
+                  <div className="font-bold text-sm text-slate-900">{b.name}</div>
                   <div className="text-xs text-slate-500">
-                    Faculty: {b.teacherName} · {b.examCategory} · {b.studentIds.length}{' '}
-                    students
+                    Course: {b.courseType || b.examCategory} • {b.description}
                   </div>
                 </div>
                 <button
-                  type="button"
                   onClick={() => deleteBatch(b.id)}
-                  className="text-xs text-rose-500 hover:underline cursor-pointer"
+                  className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer"
                 >
-                  Delete
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             ))}
@@ -880,199 +1088,188 @@ export const AdminRbacControlPanel: React.FC = () => {
         </div>
       )}
 
-      {/* SUBTAB 5: STUDENT ID PREFIX CONFIGURATION (Section 9) */}
+      {/* ================= SUBTAB: STUDENT ID GENERATOR CONFIG ================= */}
       {subTab === 'id-config' && (
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            await saveStudentIdConfig({
-              jeeMainPrefix: jeePrefix,
-              jeeAdvancedPrefix: advPrefix,
-              neetPrefix: neetPrefix,
-              mode: idMode,
-            });
-            showToast('Updated Student ID Generator prefixes in PostgreSQL');
-          }}
-          className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 max-w-2xl space-y-4"
-        >
-          <h3 className="text-lg font-black text-slate-900 dark:text-white">
-            Student ID Generator Prefix &amp; Sequence Configuration
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4 max-w-xl shadow-xs">
+          <h3 className="text-base font-black text-slate-900">
+            Student ID Prefix &amp; Format Configuration
           </h3>
-          <p className="text-xs text-slate-500">
-            Configure the institutional prefixes used when generating globally unique Student IDs (e.g. JEE26-10001, NEET26-10001). Existing Student IDs remain immutable.
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="block text-xs font-bold uppercase text-slate-600 dark:text-slate-300 mb-1">
-                JEE Main Prefix
+              <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                JEE Prefix
               </label>
               <input
                 type="text"
                 value={jeePrefix}
-                onChange={(e) => setJeePrefix(e.target.value.toUpperCase())}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                onChange={(e) => setJeePrefix(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono font-bold"
               />
             </div>
             <div>
-              <label className="block text-xs font-bold uppercase text-slate-600 dark:text-slate-300 mb-1">
-                JEE Advanced Prefix
+              <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                JEE Adv Prefix
               </label>
               <input
                 type="text"
                 value={advPrefix}
-                onChange={(e) => setAdvPrefix(e.target.value.toUpperCase())}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                onChange={(e) => setAdvPrefix(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono font-bold"
               />
             </div>
             <div>
-              <label className="block text-xs font-bold uppercase text-slate-600 dark:text-slate-300 mb-1">
-                NEET UG Prefix
+              <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                NEET Prefix
               </label>
               <input
                 type="text"
                 value={neetPrefix}
-                onChange={(e) => setNeetPrefix(e.target.value.toUpperCase())}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                onChange={(e) => setNeetPrefix(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono font-bold"
               />
             </div>
           </div>
-
-          <div>
-            <label className="block text-xs font-bold uppercase text-slate-600 dark:text-slate-300 mb-1">
-              Default Generation Mode
-            </label>
-            <select
-              value={idMode}
-              onChange={(e) => setIdMode(e.target.value as any)}
-              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold"
-            >
-              <option value="SEQUENTIAL">Sequential Counter (JEE26-10004)</option>
-              <option value="ALPHANUMERIC">Random Alphanumeric (JEE26-7F42K)</option>
-            </select>
-          </div>
-
           <button
-            type="submit"
-            className="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs uppercase tracking-wider cursor-pointer"
+            onClick={async () => {
+              await saveStudentIdConfig({
+                jeeMainPrefix: jeePrefix,
+                jeeAdvancedPrefix: advPrefix,
+                neetPrefix,
+                mode: idMode,
+              });
+              showToast('Saved Student ID configuration');
+            }}
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl cursor-pointer"
           >
-            Save Student ID Configuration
+            Save Configuration
           </button>
-        </form>
+        </div>
       )}
 
-      {/* SUBTAB 6: ANNOUNCEMENTS */}
+      {/* ================= SUBTAB: COURSE ANNOUNCEMENTS ================= */}
       {subTab === 'announcements' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-5">
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                await publishAnnouncement({
-                  title: annTitle,
-                  content: annContent,
-                  targetAudience: annAudience,
-                  priority: annPriority,
-                });
-                setAnnTitle('');
-                setAnnContent('');
-                showToast('Platform announcement published');
-              }}
-              className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4"
-            >
-              <h3 className="text-lg font-black text-slate-900 dark:text-white">
-                Broadcast Platform Announcement
-              </h3>
-              <input
-                type="text"
-                value={annTitle}
-                onChange={(e) => setAnnTitle(e.target.value)}
-                placeholder="Announcement headline..."
-                required
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-              />
-              <textarea
-                rows={4}
-                value={annContent}
-                onChange={(e) => setAnnContent(e.target.value)}
-                placeholder="Detailed bulletin..."
-                required
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
-              />
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-indigo-600 text-white font-black text-xs uppercase tracking-wider cursor-pointer"
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              await publishAnnouncement({
+                title: annTitle,
+                content: annContent,
+                courseType: annCourse,
+                targetAudience: annAudience,
+                priority: annPriority,
+              });
+              setAnnTitle('');
+              setAnnContent('');
+              showToast(`Published announcement to ${annCourse} students`);
+            }}
+            className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4 shadow-xs"
+          >
+            <h3 className="text-base font-black text-slate-900">Publish Course Announcement</h3>
+            <div>
+              <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                Target Course
+              </label>
+              <select
+                value={annCourse}
+                onChange={(e) => setAnnCourse(e.target.value as any)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
               >
-                Publish Bulletin
-              </button>
-            </form>
-          </div>
-          <div className="lg:col-span-7 space-y-3">
+                <option value="JEE">JEE Course Only</option>
+                <option value="JEE_ADVANCED">JEE Advanced Only</option>
+                <option value="NEET">NEET Course Only</option>
+                <option value="ALL">All Courses</option>
+              </select>
+            </div>
+            <input
+              type="text"
+              required
+              value={annTitle}
+              onChange={(e) => setAnnTitle(e.target.value)}
+              placeholder="Announcement Title..."
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold"
+            />
+            <textarea
+              rows={3}
+              required
+              value={annContent}
+              onChange={(e) => setAnnContent(e.target.value)}
+              placeholder="Announcement details..."
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+            />
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl cursor-pointer"
+            >
+              Publish Announcement
+            </button>
+          </form>
+
+          <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 p-6 space-y-3 shadow-xs">
+            <h3 className="text-base font-black text-slate-900">
+              Active Course Announcements ({announcements.length})
+            </h3>
             {announcements.map((a) => (
               <div
                 key={a.id}
-                className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 space-y-1"
+                className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 flex items-start justify-between gap-3"
               >
-                <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>
-                    {a.priority} · Audience: {a.targetAudience} · By {a.authorName}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeAnnouncement(a.id)}
-                    className="text-rose-500 hover:underline cursor-pointer"
-                  >
-                    Delete
-                  </button>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[10px] font-bold uppercase">
+                      Course: {a.courseType || 'ALL'}
+                    </span>
+                    <span className="font-bold text-sm text-slate-900">{a.title}</span>
+                  </div>
+                  <p className="text-xs text-slate-600">{a.content}</p>
                 </div>
-                <div className="text-sm font-black text-slate-900 dark:text-white">
-                  {a.title}
-                </div>
-                <p className="text-xs text-slate-600 dark:text-slate-300">{a.content}</p>
+                <button
+                  onClick={() => removeAnnouncement(a.id)}
+                  className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* SUBTAB 7: PASSWORD RECOVERY */}
+      {/* ================= SUBTAB: PASSWORD RECOVERY TICKETS ================= */}
       {subTab === 'recovery' && (
-        <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 space-y-4">
-          <h3 className="text-base font-black text-slate-900 dark:text-white">
-            Platform Password Recovery Queue
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 space-y-4 shadow-xs">
+          <h3 className="text-base font-black text-slate-900">
+            Student &amp; Staff Password Recovery Queue
           </h3>
           {recoveryRequests.length === 0 ? (
-            <p className="text-xs text-slate-500">No password recovery requests logged.</p>
+            <p className="text-xs text-slate-500">No recovery requests in queue.</p>
           ) : (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {recoveryRequests.map((r) => (
+            <div className="space-y-3">
+              {recoveryRequests.map((req) => (
                 <div
-                  key={r.id}
-                  className="py-3.5 flex items-center justify-between gap-4"
+                  key={req.id}
+                  className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 flex items-center justify-between"
                 >
                   <div>
-                    <div className="text-sm font-bold text-slate-900 dark:text-white">
-                      {r.userName} ({r.identifier}) · [{r.userRole}]
+                    <div className="font-bold text-xs text-slate-900">
+                      {req.userName} ({req.identifier})
                     </div>
-                    <div className="text-xs text-slate-500">
-                      Ticket: {r.recoveryCode} · {r.reason} · Status: {r.status}
-                    </div>
+                    <div className="text-[11px] text-slate-500">{req.reason}</div>
                   </div>
-                  {r.status === 'PENDING' && (
+                  {req.status === 'PENDING' ? (
                     <button
-                      type="button"
-                      onClick={() => {
-                        const tmp = `Reset@${Math.floor(1000 + Math.random() * 9000)}`;
-                        resolveRecovery(r.id, tmp);
-                        setGeneratedSlip({
-                          name: r.userName,
-                          studentId: r.identifier,
-                          tempPass: tmp,
-                        });
+                      onClick={async () => {
+                        await resolveRecovery(req.id, 'Welcome@123');
+                        showToast(`Resolved ticket for ${req.userName} (Temp pass: Welcome@123)`);
                       }}
-                      className="px-3.5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold cursor-pointer"
+                      className="px-3 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded-xl cursor-pointer"
                     >
-                      Approve &amp; Issue Temp Password
+                      Approve &amp; Reset to Welcome@123
                     </button>
+                  ) : (
+                    <span className="px-2.5 py-1 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                      RESOLVED
+                    </span>
                   )}
                 </div>
               ))}

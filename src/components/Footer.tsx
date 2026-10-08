@@ -1,11 +1,16 @@
 import React from 'react';
 import { useExam } from '../context/ExamContext';
-import { ShieldAlert, BookOpen, Sparkles, CheckCircle2 } from 'lucide-react';
+import { ShieldAlert, CheckCircle2, ShieldCheck } from 'lucide-react';
 
 export const Footer: React.FC = () => {
-  const { currentView, setCurrentView } = useExam();
+  const { currentView, setCurrentView, authProfile } = useExam();
 
   if (currentView === 'cbt-exam') return null;
+
+  const isAdmin = authProfile?.role === 'ADMIN';
+  const isTeacher = authProfile?.role === 'TEACHER';
+  const enrolledCourse = authProfile?.courseType || 'JEE';
+  const isNeetStudent = authProfile?.role === 'STUDENT' && enrolledCourse === 'NEET';
 
   return (
     <footer className="bg-slate-900 text-slate-300 pt-12 pb-8 border-t border-slate-800">
@@ -20,12 +25,13 @@ export const Footer: React.FC = () => {
                 NTA<span className="text-indigo-400">Pulse</span>
               </span>
               <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-slate-800 text-indigo-300 border border-slate-700">
-                CBT Testing System
+                Course-Isolated CBT System
               </span>
             </div>
             <p className="text-sm text-slate-400 max-w-md leading-relaxed">
-              Engineered specifically for serious JEE Main, JEE Advanced, and NEET UG aspirants.
-              Experience genuine computer-based exam ergonomics, authoritative timing, instant evaluation, and actionable weakness analytics.
+              Engineered with strict course separation for{' '}
+              {isNeetStudent ? 'NEET UG medical' : 'JEE Main, JEE Advanced, and NEET UG'} aspirants.
+              Experience genuine computer-based exam ergonomics, authoritative timing, instant evaluation, and actionable analytics.
             </p>
             <div className="p-3 bg-slate-800/60 border border-slate-700/60 rounded-xl text-xs text-amber-200/90 flex items-start gap-2 max-w-md">
               <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
@@ -37,67 +43,116 @@ export const Footer: React.FC = () => {
           </div>
 
           <div>
-            <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-4">Exam Prep</h4>
+            <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-4">
+              {authProfile?.role === 'STUDENT' ? `My ${enrolledCourse} Portal` : 'Course Navigation'}
+            </h4>
             <ul className="space-y-2 text-sm text-slate-400">
               <li>
-                <button onClick={() => setCurrentView('tests')} className="hover:text-white transition-colors">
-                  JEE Main Full Mocks (Physics, Chem, Math)
+                <button
+                  onClick={() => setCurrentView('student-dashboard')}
+                  className="hover:text-white transition-colors cursor-pointer"
+                >
+                  {isNeetStudent ? 'NEET UG Dashboard' : 'JEE Course Dashboard'}
                 </button>
               </li>
               <li>
-                <button onClick={() => setCurrentView('tests')} className="hover:text-white transition-colors">
-                  NEET UG Diagnostic Mocks (Bio, Chem, Phy)
+                <button
+                  onClick={() => setCurrentView('tests')}
+                  className="hover:text-white transition-colors cursor-pointer"
+                >
+                  {isNeetStudent
+                    ? 'NEET UG Full Mocks (Phy, Chem, Bot, Zoo)'
+                    : 'JEE Mock Tests (Phy, Chem, Math)'}
                 </button>
               </li>
               <li>
-                <button onClick={() => setCurrentView('student-custom-test')} className="hover:text-white transition-colors">
-                  High-Yield Chapter Sprint Tests
+                <button
+                  onClick={() => setCurrentView('practice-engine')}
+                  className="hover:text-white transition-colors cursor-pointer"
+                >
+                  {isNeetStudent ? 'NEET Topic Practice Engine' : 'JEE Topic Practice Engine'}
                 </button>
               </li>
               <li>
-                <button onClick={() => setCurrentView('student-custom-test')} className="hover:text-white transition-colors">
-                  Student Custom Test Builder
+                <button
+                  onClick={() => setCurrentView('student-custom-test')}
+                  className="hover:text-white transition-colors cursor-pointer"
+                >
+                  Course Custom Sprint Builder
                 </button>
               </li>
             </ul>
           </div>
 
           <div>
-            <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-4">Administration</h4>
-            <ul className="space-y-2 text-sm text-slate-400">
-              <li>
-                <button onClick={() => setCurrentView('admin-dashboard')} className="hover:text-white transition-colors flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-purple-400" />
-                  Admin Control Center
-                </button>
-              </li>
-              <li>
-                <button onClick={() => setCurrentView('admin-ai-generator')} className="hover:text-white transition-colors">
-                  AI Question Generator (Gemini 3.8)
-                </button>
-              </li>
-              <li>
-                <button onClick={() => setCurrentView('admin-paper-builder')} className="hover:text-white transition-colors">
-                  Blueprint & Paper Generator
-                </button>
-              </li>
-              <li>
-                <button onClick={() => setCurrentView('admin-questions')} className="hover:text-white transition-colors">
-                  Question Bank & Validation
-                </button>
-              </li>
-            </ul>
+            <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-4">
+              {isAdmin || isTeacher ? 'Staff Controls' : 'Student Resources'}
+            </h4>
+            {isAdmin ? (
+              <ul className="space-y-2 text-sm text-slate-400">
+                <li>
+                  <button
+                    onClick={() => setCurrentView('admin-dashboard')}
+                    className="hover:text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+                    Admin Command Center
+                  </button>
+                </li>
+                <li>
+                  <button
+                    onClick={() => setCurrentView('admin-questions')}
+                    className="hover:text-white transition-colors cursor-pointer"
+                  >
+                    Controlled Question Bank
+                  </button>
+                </li>
+              </ul>
+            ) : isTeacher ? (
+              <ul className="space-y-2 text-sm text-slate-400">
+                <li>
+                  <button
+                    onClick={() => setCurrentView('teacher-dashboard')}
+                    className="hover:text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+                    Faculty Command Portal
+                  </button>
+                </li>
+              </ul>
+            ) : (
+              <ul className="space-y-2 text-sm text-slate-400">
+                <li>
+                  <button
+                    onClick={() => setCurrentView('bookmarks-mistakes')}
+                    className="hover:text-white transition-colors cursor-pointer"
+                  >
+                    Bookmarks &amp; Mistake Vault
+                  </button>
+                </li>
+                <li>
+                  <button
+                    onClick={() => setCurrentView('result')}
+                    className="hover:text-white transition-colors cursor-pointer"
+                  >
+                    My Course Results &amp; Analytics
+                  </button>
+                </li>
+              </ul>
+            )}
           </div>
         </div>
 
         <div className="pt-8 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
-          <p>© {new Date().getFullYear()} NTA Pulse. All mock papers, formulas and CBT analytics strictly for student practice.</p>
-            <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
-              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-              Secure Testing Engine Active
-            </span>
-          </div>
+          <p>
+            © {new Date().getFullYear()} NTA Pulse. All mock papers, formulas, and CBT analytics are strictly isolated by course enrollment.
+          </p>
+          <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+            Course-Enforced Testing Engine Active
+          </span>
         </div>
-      </footer>
-    );
-  };
+      </div>
+    </footer>
+  );
+};

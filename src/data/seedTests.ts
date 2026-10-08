@@ -1,6 +1,11 @@
 import { TestDefinition } from '../types/exam';
 import { getAllFullLengthPapers, getCentralizedQuestionBank } from './fullLengthPapersGenerator';
-import { selectQuestionsIntelligent, createDeterministicRng } from './questionBankEngine';
+import {
+  selectQuestionsIntelligent,
+  createDeterministicRng,
+  buildTestQuestionMappings,
+  validateGeneratedTestQuestions,
+} from './questionBankEngine';
 
 const fullLengthPapers = getAllFullLengthPapers();
 const centralBank = getCentralizedQuestionBank();
@@ -12,6 +17,7 @@ const phyChapterQuestions = selectQuestionsIntelligent(centralBank, {
   testIdForTracking: 'jee-phy-chapter-01',
   rng: createDeterministicRng(7001),
 });
+validateGeneratedTestQuestions(phyChapterQuestions);
 
 const bioChapterQuestions = [
   ...selectQuestionsIntelligent(centralBank, {
@@ -29,12 +35,16 @@ const bioChapterQuestions = [
     rng: createDeterministicRng(7003),
   }),
 ];
+validateGeneratedTestQuestions(bioChapterQuestions);
 
 const chapterTests: TestDefinition[] = [
   {
     id: 'jee-phy-chapter-01',
+    testId: 'jee-phy-chapter-01',
     title: 'JEE Physics: Electrostatics & Rotational Mechanics Sprint',
     subtitle: 'High-Yield Chapter Test with Detailed Numerical Problems',
+    courseId: 'course_jee',
+    courseType: 'JEE',
     examType: 'JEE_MAIN',
     testType: 'CHAPTER_TEST',
     patternYear: 2026,
@@ -57,11 +67,13 @@ const chapterTests: TestDefinition[] = [
     avgScore: 36,
     questions: phyChapterQuestions,
     snapshotQuestionIds: phyChapterQuestions.map((q) => q.questionId || q.id),
+    testQuestions: buildTestQuestionMappings('jee-phy-chapter-01', phyChapterQuestions, 1, 'Set A'),
     attemptSnapshots: [
       {
         attemptNumber: 1,
         setLabel: 'Set A',
         questionIds: phyChapterQuestions.map((q) => q.questionId || q.id),
+        testQuestions: buildTestQuestionMappings('jee-phy-chapter-01', phyChapterQuestions, 1, 'Set A'),
         createdAt: '2026-02-10T12:00:00Z',
       },
     ],
@@ -69,8 +81,11 @@ const chapterTests: TestDefinition[] = [
   },
   {
     id: 'neet-bio-chapter-01',
+    testId: 'neet-bio-chapter-01',
     title: 'NEET Biology: Genetics, Cell Cycle & Physiology Sprint',
     subtitle: 'Targeted High-Scoring NCERT Concept Test',
+    courseId: 'course_neet',
+    courseType: 'NEET',
     examType: 'NEET',
     testType: 'CHAPTER_TEST',
     patternYear: 2026,
@@ -92,11 +107,13 @@ const chapterTests: TestDefinition[] = [
     avgScore: 48,
     questions: bioChapterQuestions,
     snapshotQuestionIds: bioChapterQuestions.map((q) => q.questionId || q.id),
+    testQuestions: buildTestQuestionMappings('neet-bio-chapter-01', bioChapterQuestions, 1, 'Set A'),
     attemptSnapshots: [
       {
         attemptNumber: 1,
         setLabel: 'Set A',
         questionIds: bioChapterQuestions.map((q) => q.questionId || q.id),
+        testQuestions: buildTestQuestionMappings('neet-bio-chapter-01', bioChapterQuestions, 1, 'Set A'),
         createdAt: '2026-02-12T14:00:00Z',
       },
     ],
@@ -105,3 +122,4 @@ const chapterTests: TestDefinition[] = [
 ];
 
 export const SEED_TESTS: TestDefinition[] = [...fullLengthPapers, ...chapterTests];
+

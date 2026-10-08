@@ -2,6 +2,9 @@ import crypto from 'node:crypto';
 import { eq, desc, or, and, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
+  courses,
+  enrollments,
+  studyMaterials,
   profiles,
   authSessions,
   batches,
@@ -15,6 +18,11 @@ import {
   AuthProfile,
   UserRole,
   AccountStatus,
+  CourseType,
+  EnrollmentStatus,
+  CourseRecord,
+  EnrollmentRecord,
+  StudyMaterialRecord,
   BatchRecord,
   TestAssignmentRecord,
   AnnouncementRecord,
@@ -24,6 +32,105 @@ import {
   TeacherPermissions,
 } from '../types/auth.ts';
 import { ExamType, SubjectName } from '../types/exam.ts';
+
+// ----------------- COURSE & ENROLLMENT AUTHORIZATION HELPERS -----------------
+
+export function resolveCourseFromExam(
+  examOrCourse?: string | null
+): {
+  courseId: string;
+  courseType: CourseType;
+  assignedCourses: CourseType[];
+  defaultSubjects: SubjectName[];
+} {
+  const val = (examOrCourse || 'JEE_MAIN').toUpperCase();
+  if (val === 'NEET' || val === 'COURSE_NEET') {
+    return {
+      courseId: 'course_neet',
+      courseType: 'NEET',
+      assignedCourses: ['NEET'],
+      defaultSubjects: ['Physics', 'Chemistry', 'Botany', 'Zoology'],
+    };
+  }
+  if (val === 'JEE_ADVANCED' || val === 'COURSE_JEE_ADV') {
+    return {
+      courseId: 'course_jee_adv',
+      courseType: 'JEE_ADVANCED',
+      assignedCourses: ['JEE', 'JEE_ADVANCED'],
+      defaultSubjects: ['Physics', 'Chemistry', 'Mathematics'],
+    };
+  }
+  return {
+    courseId: 'course_jee',
+    courseType: 'JEE',
+    assignedCourses: ['JEE'],
+    defaultSubjects: ['Physics', 'Chemistry', 'Mathematics'],
+  };
+}
+
+export function normalizeTargetToCourseType(target?: string | null): CourseType {
+  const val = (target || 'JEE').toUpperCase();
+  if (val === 'NEET' || val === 'COURSE_NEET') return 'NEET';
+  if (val === 'JEE_ADVANCED' || val === 'COURSE_JEE_ADV') return 'JEE_ADVANCED';
+  return 'JEE';
+}
+
+export function getAuthorizedCourseTypes(profile?: AuthProfile | null): CourseType[] {
+  if (!profile) return [];
+  if (profile.role === 'ADMIN') {
+    return ['JEE', 'JEE_ADVANCED', 'NEET'];
+  }
+  if (profile.role === 'STUDENT' && profile.enrollmentStatus && profile.enrollmentStatus !== 'ACTIVE') {
+    return [];
+  }
+  if (profile.assignedCourses && profile.assignedCourses.length > 0) {
+    return profile.assignedCourses;
+  }
+  const resolved = resolveCourseFromExam(profile.courseType || profile.examCategory);
+  return resolved.assignedCourses;
+}
+
+export function getAuthorizedCourseIds(profile?: AuthProfile | null): string[] {
+  const types = getAuthorizedCourseTypes(profile);
+  const ids: string[] = [];
+  if (types.includes('JEE')) ids.push('course_jee');
+  if (types.includes('JEE_ADVANCED')) ids.push('course_jee_adv');
+  if (types.includes('NEET')) ids.push('course_neet');
+  return ids;
+}
+
+export function isCourseAuthorizedForUser(
+  profile: AuthProfile | null | undefined,
+  targetCourseOrExam: string | null | undefined
+): boolean {
+  if (!profile) return false;
+  if (profile.role === 'ADMIN') return true;
+  if (profile.status !== 'ACTIVE') return false;
+  if (profile.role === 'STUDENT' && profile.enrollmentStatus && profile.enrollmentStatus !== 'ACTIVE') {
+    return false;
+  }
+  if (!targetCourseOrExam || targetCourseOrExam === 'ALL') return true;
+  const targetCourseType = normalizeTargetToCourseType(targetCourseOrExam);
+  const allowed = getAuthorizedCourseTypes(profile);
+  return allowed.includes(targetCourseType);
+}
+
+export function getAuthorizedSubjectsForUser(profile?: AuthProfile | null): SubjectName[] {
+  if (!profile) return ['Physics', 'Chemistry', 'Mathematics'];
+  if (profile.role === 'ADMIN') {
+    return ['Physics', 'Chemistry', 'Mathematics', 'Botany', 'Zoology'];
+  }
+  const allowedCourses = getAuthorizedCourseTypes(profile);
+  if (allowedCourses.includes('NEET') && !allowedCourses.includes('JEE')) {
+    return ['Physics', 'Chemistry', 'Botany', 'Zoology'];
+  }
+  if (allowedCourses.includes('JEE') && !allowedCourses.includes('NEET')) {
+    return ['Physics', 'Chemistry', 'Mathematics'];
+  }
+  return profile.subjectAccess && profile.subjectAccess.length > 0
+    ? profile.subjectAccess
+    : ['Physics', 'Chemistry', 'Mathematics'];
+}
 
 // ----------------- CRYPTOGRAPHIC PASSWORD & TOKEN HELPERS -----------------
 
@@ -94,8 +201,20 @@ export function mapRowToProfile(
   row: typeof profiles.$inferSelect,
   teacherMap?: Map<string, string>,
   batchMap?: Map<string, string>,
-  sessionCounts?: Map<string, number>
+  sessionCounts?: Map<string, number>,
+  enrollmentMap?: Map<string, EnrollmentRecord[]>
 ): AuthProfile {
+  const resolved = resolveCourseFromExam(row.courseType || row.examCategory);
+  const courseId = row.courseId || resolved.courseId;
+  const courseType = (row.courseType as CourseType) || resolved.courseType;
+  const enrollmentStatus = (row.enrollmentStatus as EnrollmentStatus) || 'ACTIVE';
+  const assignedCourses = parseJsonSafe<CourseType[]>(
+    row.assignedCoursesJson,
+    row.role === 'ADMIN'
+      ? ['JEE', 'JEE_ADVANCED', 'NEET']
+      : resolved.assignedCourses
+  );
+
   return {
     id: row.id,
     username: row.username,
@@ -109,8 +228,13 @@ export function mapRowToProfile(
     batchName: row.batchId && batchMap ? batchMap.get(row.batchId) || null : null,
     className: row.className,
     examCategory: (row.examCategory as ExamType) || 'JEE_MAIN',
+    courseId,
+    courseType,
+    enrollmentStatus,
+    assignedCourses,
+    enrollments: enrollmentMap ? enrollmentMap.get(row.id) || [] : [],
     targetYear: row.targetYear || 2026,
-    subjectAccess: parseJsonSafe<SubjectName[]>(row.subjectAccessJson, ['Physics', 'Chemistry', 'Mathematics']),
+    subjectAccess: parseJsonSafe<SubjectName[]>(row.subjectAccessJson, resolved.defaultSubjects),
     testAccess: parseJsonSafe<string[]>(row.testAccessJson, []),
     teacherPermissions: parseJsonSafe<TeacherPermissions>(row.teacherPermissionsJson, DEFAULT_TEACHER_PERMS),
     status: (row.status as AccountStatus) || 'ACTIVE',
@@ -125,11 +249,14 @@ export function mapRowToProfile(
 }
 
 export function mapRowToBatch(row: typeof batches.$inferSelect): BatchRecord {
+  const resolved = resolveCourseFromExam(row.courseType || row.examCategory);
   return {
     id: row.id,
     name: row.name,
     description: row.description || '',
     examCategory: (row.examCategory as ExamType) || 'JEE_MAIN',
+    courseId: row.courseId || resolved.courseId,
+    courseType: (row.courseType as CourseType) || resolved.courseType,
     className: row.className || 'Class 12',
     teacherId: row.teacherId,
     teacherName: row.teacherName,
@@ -289,17 +416,6 @@ let isAuthSeeded = false;
 export async function ensureAuthSeeded(): Promise<void> {
   if (isAuthSeeded) return;
   try {
-    const existingProfiles = await db.select({ id: profiles.id }).from(profiles).limit(1);
-    if (existingProfiles.length > 0) {
-      isAuthSeeded = true;
-      return;
-    }
-
-    console.log('Seeding initial RBAC accounts, batches, assignments, and settings...');
-
-    await updateStudentIdConfig(DEFAULT_STUDENT_ID_CONFIG);
-
-    // 1. Admin Account
     const adminId = 'usr-admin-01';
     const teacher1Id = 'usr-teacher-hcverma';
     const teacher2Id = 'usr-teacher-ritusharma';
@@ -314,6 +430,210 @@ export async function ensureAuthSeeded(): Promise<void> {
     const student4Id = 'usr-student-rohan';
     const student5Id = 'usr-student-vikram';
 
+    // Always ensure canonical courses, enrollments, and study materials exist
+    await db
+      .insert(courses)
+      .values([
+        {
+          id: 'course_jee',
+          name: 'JEE (Main) Engineering Entrance Course',
+          type: 'JEE',
+          description: 'Physics, Chemistry & Mathematics — Official 75-Question (300 Marks) NTA CBT Curriculum.',
+          active: true,
+          createdAt: new Date(),
+        },
+        {
+          id: 'course_jee_adv',
+          name: 'JEE (Advanced) IIT Entrance Course',
+          type: 'JEE_ADVANCED',
+          description: 'High-Order Multi-Format Paper 1 & Paper 2 IIT Entrance Curriculum (Physics, Chemistry, Mathematics).',
+          active: true,
+          createdAt: new Date(),
+        },
+        {
+          id: 'course_neet',
+          name: 'NEET (UG) Pre-Medical Entrance Course',
+          type: 'NEET',
+          description: 'Physics, Chemistry, Botany & Zoology — Official 180-Question (720 Marks) Medical Entrance Curriculum.',
+          active: true,
+          createdAt: new Date(),
+        },
+      ])
+      .onConflictDoNothing();
+
+    await db
+      .insert(enrollments)
+      .values([
+        {
+          id: 'enr-rahul-jee',
+          studentId: student1Id,
+          courseId: 'course_jee',
+          courseType: 'JEE',
+          status: 'ACTIVE',
+          assignedBy: teacher1Id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        {
+          id: 'enr-aarav-jee',
+          studentId: student2Id,
+          courseId: 'course_jee',
+          courseType: 'JEE',
+          status: 'ACTIVE',
+          assignedBy: teacher1Id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        {
+          id: 'enr-aarav-jee-adv',
+          studentId: student2Id,
+          courseId: 'course_jee_adv',
+          courseType: 'JEE_ADVANCED',
+          status: 'ACTIVE',
+          assignedBy: teacher1Id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        {
+          id: 'enr-ananya-neet',
+          studentId: student3Id,
+          courseId: 'course_neet',
+          courseType: 'NEET',
+          status: 'ACTIVE',
+          assignedBy: teacher2Id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        {
+          id: 'enr-rohan-neet',
+          studentId: student4Id,
+          courseId: 'course_neet',
+          courseType: 'NEET',
+          status: 'ACTIVE',
+          assignedBy: teacher2Id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        {
+          id: 'enr-vikram-jee',
+          studentId: student5Id,
+          courseId: 'course_jee',
+          courseType: 'JEE',
+          status: 'SUSPENDED',
+          assignedBy: teacher1Id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ])
+      .onConflictDoNothing();
+
+    await db
+      .insert(studyMaterials)
+      .values([
+        {
+          id: 'mat-jee-phy-01',
+          courseId: 'course_jee',
+          courseType: 'JEE',
+          subject: 'Physics',
+          chapter: 'Rotational Mechanics & Electrostatics',
+          title: 'JEE Main 2026 Physics Master Formula & Theorem Sheet',
+          materialType: 'FORMULA_SHEET',
+          description: 'Complete Moment of Inertia tensors, Rolling without slipping conservation equations, Gauss Law flux integrals, and Dielectric slab capacitor relations.',
+          contentBody: '1. Moment of Inertia: I_cm for Ring = MR^2, Disc = 1/2 MR^2, Solid Sphere = 2/5 MR^2, Hollow Sphere = 2/3 MR^2.\n2. Rolling Acceleration on incline θ: a = g sinθ / (1 + I / MR^2).\n3. Parallel Plate Capacitor with Dielectric Slab thickness t: C = ε₀A / (d - t + t/K).',
+          createdBy: teacher1Id,
+          createdAt: new Date(),
+        },
+        {
+          id: 'mat-jee-chem-01',
+          courseId: 'course_jee',
+          courseType: 'JEE',
+          subject: 'Chemistry',
+          chapter: 'Electrochemistry & Chemical Kinetics',
+          title: 'JEE Main Physical Chemistry Rapid Revision Handbook',
+          materialType: 'CONCEPT_SUMMARY',
+          description: 'Nernst equation derivations at 298 K, First-order kinetics half-life relations, Arrhenius activation energy equations, and Colligative properties.',
+          contentBody: '1. Nernst Equation: E_cell = E°_cell - (0.0591 / n) log Q at 298 K.\n2. First Order Kinetics: k = (2.303 / t) log([A]₀ / [A]_t), t_{1/2} = 0.693 / k.\n3. Gibbs Free Energy: ΔG° = -nFE°_cell = -2.303 RT log K_eq.',
+          createdBy: teacher1Id,
+          createdAt: new Date(),
+        },
+        {
+          id: 'mat-jee-math-01',
+          courseId: 'course_jee',
+          courseType: 'JEE',
+          subject: 'Mathematics',
+          chapter: 'Definite Calculus, Matrices & 3D Vectors',
+          title: 'JEE Main Mathematics High-Weightage Identities & Shortcuts',
+          materialType: 'FORMULA_SHEET',
+          description: 'King property of definite integrals, Cayley-Hamilton characteristic equations, Shortest distance between skew lines, and Conic section tangents.',
+          contentBody: '1. King Property: ∫_a^b f(x) dx = ∫_a^b f(a + b - x) dx.\n2. Determinants: |adj(A)| = |A|^{n-1}, |kA| = k^n |A|.\n3. Shortest Distance between Skew Lines: d = |(b₁ × b₂) · (a₂ - a₁)| / |b₁ × b₂|.',
+          createdBy: teacher1Id,
+          createdAt: new Date(),
+        },
+        {
+          id: 'mat-jee-adv-01',
+          courseId: 'course_jee_adv',
+          courseType: 'JEE_ADVANCED',
+          subject: 'Physics',
+          chapter: 'Advanced Electrodynamics & Modern Physics',
+          title: 'JEE Advanced Multi-Concept Problem Solving Monograph',
+          materialType: 'PYQ_BOOKLET',
+          description: 'Non-uniform charge distributions, motional EMF in rotating conductors, de Broglie matter waves in variable potentials, and RC transient circuits.',
+          contentBody: '1. Motional EMF in rotating rod in uniform B: ε = 1/2 B ω L^2.\n2. Radiation Pressure for perfectly reflecting surface: P = 2I / c.\n3. Bohr Orbit Velocity & Energy: v_n ∝ Z/n, E_n = -13.6 Z^2 / n^2 eV.',
+          createdBy: teacher1Id,
+          createdAt: new Date(),
+        },
+        {
+          id: 'mat-neet-bio-01',
+          courseId: 'course_neet',
+          courseType: 'NEET',
+          subject: 'Botany',
+          chapter: 'Genetics, Molecular Biology & Plant Physiology',
+          title: 'NEET UG NCERT Line-by-Line Botany Master Compendium',
+          materialType: 'NOTES',
+          description: 'Mendelian dihybrid phenotypic ratios, Lac Operon regulation, C3 vs C4 Kranz anatomy pathways, and Meiosis Prophase-I sub-stages.',
+          contentBody: '1. Prophase-I Stages: Leptotene -> Zygotene (Synapsis) -> Pachytene (Crossing over) -> Diplotene (Chiasmata) -> Diakinesis.\n2. C4 Cycle (Hatch-Slack): Primary CO₂ acceptor is PEP (3-carbon) in mesophyll cells catalyzed by PEPcase.\n3. Hardy-Weinberg Equilibrium: p² + 2pq + q² = 1.',
+          createdBy: teacher2Id,
+          createdAt: new Date(),
+        },
+        {
+          id: 'mat-neet-zoo-01',
+          courseId: 'course_neet',
+          courseType: 'NEET',
+          subject: 'Zoology',
+          chapter: 'Human Physiology & Biotechnology Applications',
+          title: 'NEET UG Zoology High-Yield NCERT Clinical & Hormone Chart',
+          materialType: 'CONCEPT_SUMMARY',
+          description: 'Cardiac cycle ventricular volumes, Oxyhaemoglobin dissociation curve shifts, Counter-current mechanism in Henle loop, and PCR Taq polymerase steps.',
+          contentBody: '1. Cardiac Output = Stroke Volume (70 mL) × Heart Rate (72 bpm) ≈ 5040 mL/min.\n2. PCR Cycle Steps: Denaturation (94°C) -> Annealing (54°C) -> Extension (72°C with Taq Polymerase).\n3. Neurohypophysis Hormones: Oxytocin and Vasopressin (ADH) synthesized in hypothalamus.',
+          createdBy: teacher2Id,
+          createdAt: new Date(),
+        },
+        {
+          id: 'mat-neet-phychem-01',
+          courseId: 'course_neet',
+          courseType: 'NEET',
+          subject: 'Physics',
+          chapter: 'NEET Physics & Chemistry Rapid Calculation Formulae',
+          title: 'NEET UG 180-Minute Speed Calculation Formula Booklet',
+          materialType: 'FORMULA_SHEET',
+          description: 'Ray optics lens-maker equation, Logic gates truth tables, Semiconductors, Coordination chemistry EAN & VSEPR hybridization tables for NEET.',
+          contentBody: '1. Lens Maker Formula: 1/f = (n₂/n₁ - 1)(1/R₁ - 1/R₂).\n2. Radioactive Decay & Photoelectric Effect: K_max = hν - φ₀.\n3. Spin-Only Magnetic Moment: μ = √(n(n+2)) BM where n = number of unpaired electrons.',
+          createdBy: teacher2Id,
+          createdAt: new Date(),
+        },
+      ])
+      .onConflictDoNothing();
+
+    const existingProfiles = await db.select({ id: profiles.id }).from(profiles).limit(1);
+    if (existingProfiles.length > 0) {
+      isAuthSeeded = true;
+      return;
+    }
+
+    console.log('Seeding initial RBAC accounts, courses, enrollments, batches, and settings...');
+
+    await updateStudentIdConfig(DEFAULT_STUDENT_ID_CONFIG);
+
     await db.insert(profiles).values([
       {
         id: adminId,
@@ -327,6 +647,10 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: null,
         className: 'Administration',
         examCategory: 'JEE_MAIN',
+        courseId: 'course_jee',
+        courseType: 'JEE',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['JEE', 'JEE_ADVANCED', 'NEET']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Mathematics', 'Botany', 'Zoology']),
         testAccessJson: JSON.stringify(['ALL']),
@@ -355,6 +679,10 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: null,
         className: 'JEE Faculty',
         examCategory: 'JEE_MAIN',
+        courseId: 'course_jee',
+        courseType: 'JEE',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['JEE', 'JEE_ADVANCED']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Mathematics']),
         testAccessJson: JSON.stringify([]),
@@ -377,6 +705,10 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: null,
         className: 'NEET Faculty',
         examCategory: 'NEET',
+        courseId: 'course_neet',
+        courseType: 'NEET',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['NEET']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Botany', 'Zoology']),
         testAccessJson: JSON.stringify([]),
@@ -399,9 +731,13 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: batchJeeMainId,
         className: 'Class 12',
         examCategory: 'JEE_MAIN',
+        courseId: 'course_jee',
+        courseType: 'JEE',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['JEE']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Mathematics']),
-        testAccessJson: JSON.stringify(['jee-main-full-mock-01', 'jee-main-full-mock-02']),
+        testAccessJson: JSON.stringify(['jee-main-full-mock-01', 'JEE-MAIN-002']),
         teacherPermissionsJson: JSON.stringify({}),
         status: 'ACTIVE',
         mustChangePassword: false,
@@ -421,9 +757,13 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: batchJeeAdvId,
         className: 'Class 12',
         examCategory: 'JEE_ADVANCED',
+        courseId: 'course_jee_adv',
+        courseType: 'JEE_ADVANCED',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['JEE', 'JEE_ADVANCED']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Mathematics']),
-        testAccessJson: JSON.stringify(['jee-adv-2026-paper1-01', 'jee-main-full-mock-01']),
+        testAccessJson: JSON.stringify(['jee-adv-paper1-mock-01', 'jee-main-full-mock-01']),
         teacherPermissionsJson: JSON.stringify({}),
         status: 'ACTIVE',
         mustChangePassword: true,
@@ -443,9 +783,13 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: batchNeetBioId,
         className: 'Class 12',
         examCategory: 'NEET',
+        courseId: 'course_neet',
+        courseType: 'NEET',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['NEET']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Botany', 'Zoology']),
-        testAccessJson: JSON.stringify(['neet-ug-full-mock-01', 'neet-ug-full-mock-02']),
+        testAccessJson: JSON.stringify(['neet-ug-full-mock-01', 'NEET-UG-002']),
         teacherPermissionsJson: JSON.stringify({}),
         status: 'ACTIVE',
         mustChangePassword: false,
@@ -465,6 +809,10 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: batchNeetBioId,
         className: 'Dropper / Repeater',
         examCategory: 'NEET',
+        courseId: 'course_neet',
+        courseType: 'NEET',
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(['NEET']),
         targetYear: 2026,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Botany', 'Zoology']),
         testAccessJson: JSON.stringify(['neet-ug-full-mock-01']),
@@ -487,6 +835,10 @@ export async function ensureAuthSeeded(): Promise<void> {
         batchId: batchJeeMainId,
         className: 'Class 11',
         examCategory: 'JEE_MAIN',
+        courseId: 'course_jee',
+        courseType: 'JEE',
+        enrollmentStatus: 'SUSPENDED',
+        assignedCoursesJson: JSON.stringify(['JEE']),
         targetYear: 2027,
         subjectAccessJson: JSON.stringify(['Physics', 'Chemistry', 'Mathematics']),
         testAccessJson: JSON.stringify([]),
@@ -499,18 +851,20 @@ export async function ensureAuthSeeded(): Promise<void> {
       },
     ]);
 
-    // 2. Seed Batches
+    // 2. Seed Batches with Course IDs
     await db.insert(batches).values([
       {
         id: batchJeeAdvId,
         name: 'JEE Advanced 2027 Batch A',
         description: 'Elite rankers batch focused on multi-concept problem solving for IIT JEE Paper 1 & Paper 2.',
         examCategory: 'JEE_ADVANCED',
+        courseId: 'course_jee_adv',
+        courseType: 'JEE_ADVANCED',
         className: 'Class 12',
         teacherId: teacher1Id,
         teacherName: 'Prof. H.C. Verma (HOD Physics & JEE Mentor)',
         status: 'ACTIVE',
-        assignedTestIdsJson: JSON.stringify(['jee-adv-2026-paper1-01', 'jee-adv-2026-paper2-01', 'jee-main-full-mock-01']),
+        assignedTestIdsJson: JSON.stringify(['jee-adv-paper1-mock-01', 'JEE-ADV-002', 'jee-main-full-mock-01']),
         studentIdsJson: JSON.stringify([student2Id]),
         createdAt: new Date(),
       },
@@ -519,11 +873,13 @@ export async function ensureAuthSeeded(): Promise<void> {
         name: 'JEE Main 2027 Morning Batch',
         description: 'Comprehensive NCERT + NTA CBT simulation batch for JEE Main Paper 1 (75 Questions / 300 Marks).',
         examCategory: 'JEE_MAIN',
+        courseId: 'course_jee',
+        courseType: 'JEE',
         className: 'Class 12',
         teacherId: teacher1Id,
         teacherName: 'Prof. H.C. Verma (HOD Physics & JEE Mentor)',
         status: 'ACTIVE',
-        assignedTestIdsJson: JSON.stringify(['jee-main-full-mock-01', 'jee-main-full-mock-02', 'jee-main-pyq-2024-jan27-s1']),
+        assignedTestIdsJson: JSON.stringify(['jee-main-full-mock-01', 'JEE-MAIN-002', 'pyq-jee-main-2025-jan-s1']),
         studentIdsJson: JSON.stringify([student1Id, student5Id]),
         createdAt: new Date(),
       },
@@ -532,22 +888,26 @@ export async function ensureAuthSeeded(): Promise<void> {
         name: 'NEET 2027 Biology Batch',
         description: 'Dedicated pre-medical cohort covering Physics, Chemistry, Botany & Zoology (180 Compulsory Questions).',
         examCategory: 'NEET',
+        courseId: 'course_neet',
+        courseType: 'NEET',
         className: 'Class 12',
         teacherId: teacher2Id,
         teacherName: 'Dr. Ritu Sharma (Senior NEET Biology & Chemistry Faculty)',
         status: 'ACTIVE',
-        assignedTestIdsJson: JSON.stringify(['neet-ug-full-mock-01', 'neet-ug-full-mock-02', 'neet-pyq-2024-official']),
+        assignedTestIdsJson: JSON.stringify(['neet-ug-full-mock-01', 'NEET-UG-002', 'pyq-neet-ug-2025-official']),
         studentIdsJson: JSON.stringify([student3Id, student4Id]),
         createdAt: new Date(),
       },
     ]);
 
-    // 3. Seed Announcements
+    // 3. Seed Course-Scoped Announcements
     await db.insert(announcements).values([
       {
         id: 'ann-01',
-        title: 'All-India JEE Main & NEET UG 2026 Mock Window Open',
-        content: 'Full-length proctored CBT mock tests following the latest NTA 2026 examination bulletin are now live for assigned batches. Complete your system check 15 minutes before starting.',
+        title: 'Official 2026 Examination Security & Course Isolation Active',
+        content: 'All mock tests, PYQ archives, and analytics are strictly bound to your enrolled course. Complete your system check 15 minutes before starting.',
+        courseId: 'ALL',
+        courseType: 'ALL',
         authorId: adminId,
         authorName: 'Dr. Rajeshwar Rao (Chief Controller)',
         authorRole: 'ADMIN',
@@ -559,7 +919,9 @@ export async function ensureAuthSeeded(): Promise<void> {
       {
         id: 'ann-02',
         title: 'JEE Main Morning Batch: Mandatory Full Mock #01 Review',
-        content: 'All students in JEE Main 2027 Morning Batch must complete Full Mock Test #01 by Sunday 8:00 PM. Detailed rotational mechanics and electrostatics error analysis will be discussed in class.',
+        content: 'All JEE students in JEE Main 2027 Morning Batch must complete Full Mock Test #01 by Sunday 8:00 PM. Rotational mechanics and electrostatics numericals will be discussed.',
+        courseId: 'course_jee',
+        courseType: 'JEE',
         authorId: teacher1Id,
         authorName: 'Prof. H.C. Verma',
         authorRole: 'TEACHER',
@@ -571,7 +933,9 @@ export async function ensureAuthSeeded(): Promise<void> {
       {
         id: 'ann-03',
         title: 'NEET 2027 Biology Batch: Genetics & Plant Physiology Drill',
-        content: 'NEET Full Mock #01 has been assigned to the batch. Pay special attention to Assertion-Reason statements in Botany.',
+        content: 'NEET Full Mock #01 (180 Compulsory MCQs) has been assigned to the NEET cohort. Pay special attention to NCERT Genetics and Human Physiology.',
+        courseId: 'course_neet',
+        courseType: 'NEET',
         authorId: teacher2Id,
         authorName: 'Dr. Ritu Sharma',
         authorRole: 'TEACHER',
@@ -590,8 +954,8 @@ export async function ensureAuthSeeded(): Promise<void> {
         actorName: 'Dr. Rajeshwar Rao',
         actorRole: 'ADMIN',
         action: 'SYSTEM_BOOTSTRAP',
-        target: 'RBAC Examination Security Engine',
-        details: 'Initialized PostgreSQL profiles, scrypt password hashes, role gates, and batch assignments.',
+        target: 'RBAC & Course Separation Security Engine',
+        details: 'Initialized PostgreSQL profiles, courses (JEE, JEE_ADVANCED, NEET), student enrollments, and course-scoped RLS policies.',
         createdAt: new Date(),
       },
       {
@@ -599,15 +963,15 @@ export async function ensureAuthSeeded(): Promise<void> {
         actorId: teacher1Id,
         actorName: 'Prof. H.C. Verma',
         actorRole: 'TEACHER',
-        action: 'GENERATE_STUDENT_ID',
-        target: 'JEE26-7F42K (Aarav Mehta)',
-        details: 'Issued temporary first-login credentials and assigned to JEE Advanced 2027 Batch A.',
+        action: 'ENROLL_STUDENT_COURSE',
+        target: 'JEE26-10001 (Rahul Verma) -> course_jee',
+        details: 'Verified ACTIVE enrollment in JEE (Main) course.',
         createdAt: new Date(),
       },
     ]);
 
     isAuthSeeded = true;
-    console.log('RBAC seeding complete.');
+    console.log('RBAC & Course Separation seeding complete.');
   } catch (err) {
     console.error('Error seeding RBAC tables:', err);
   }
@@ -729,6 +1093,21 @@ export async function authenticateUser(params: {
       error: `Account Expired — Your examination enrollment expired on ${new Date(
         userRow.expiresAt
       ).toLocaleDateString()}. Please contact your teacher or administrator to extend validity.`,
+    };
+  }
+
+  // Check Course Enrollment Status for STUDENT (Section 1 & Section 24)
+  if (
+    userRow.role === 'STUDENT' &&
+    userRow.enrollmentStatus &&
+    userRow.enrollmentStatus !== 'ACTIVE'
+  ) {
+    return {
+      success: false,
+      statusCode: 403,
+      error: `Course Enrollment ${userRow.enrollmentStatus} — Your enrollment in the ${
+        userRow.courseType || userRow.examCategory
+      } course is currently ${userRow.enrollmentStatus}. Please contact your Faculty Mentor or Administrator.`,
     };
   }
 
@@ -978,21 +1357,44 @@ export async function getAllProfiles(): Promise<AuthProfile[]> {
   await ensureAuthSeeded();
   const allRows = await db.select().from(profiles).orderBy(desc(profiles.createdAt));
   const allBatches = await db.select().from(batches);
+  const allEnrollments = await db.select().from(enrollments);
   const activeSessions = await db
     .select()
     .from(authSessions)
     .where(eq(authSessions.revoked, false));
 
   const teacherMap = new Map<string, string>();
+  const studentNameMap = new Map<string, { fullName: string; studentId?: string | null }>();
   allRows.forEach((r) => {
     if (r.role === 'TEACHER' || r.role === 'ADMIN') {
       teacherMap.set(r.id, r.fullName);
     }
+    studentNameMap.set(r.id, { fullName: r.fullName, studentId: r.studentId });
   });
 
   const batchMap = new Map<string, string>();
   allBatches.forEach((b) => {
     batchMap.set(b.id, b.name);
+  });
+
+  const enrollmentMap = new Map<string, EnrollmentRecord[]>();
+  allEnrollments.forEach((e) => {
+    const stuInfo = studentNameMap.get(e.studentId);
+    const rec: EnrollmentRecord = {
+      id: e.id,
+      studentId: e.studentId,
+      studentName: stuInfo?.fullName,
+      studentCode: stuInfo?.studentId,
+      courseId: e.courseId,
+      courseType: e.courseType as CourseType,
+      status: (e.status as EnrollmentStatus) || 'ACTIVE',
+      assignedBy: e.assignedBy,
+      createdAt: e.createdAt ? e.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: e.updatedAt ? e.updatedAt.toISOString() : new Date().toISOString(),
+    };
+    const arr = enrollmentMap.get(e.studentId) || [];
+    arr.push(rec);
+    enrollmentMap.set(e.studentId, arr);
   });
 
   const now = Date.now();
@@ -1003,7 +1405,9 @@ export async function getAllProfiles(): Promise<AuthProfile[]> {
     }
   });
 
-  return allRows.map((row) => mapRowToProfile(row, teacherMap, batchMap, sessionCounts));
+  return allRows.map((row) =>
+    mapRowToProfile(row, teacherMap, batchMap, sessionCounts, enrollmentMap)
+  );
 }
 
 export async function getProfileById(userId: string): Promise<AuthProfile | null> {
@@ -1121,10 +1525,8 @@ export async function createStudentAccount(params: {
       ? params.actor.id
       : params.teacherId || 'usr-teacher-hcverma';
 
-  const defaultSubjects: SubjectName[] =
-    params.examCategory === 'NEET'
-      ? ['Physics', 'Chemistry', 'Botany', 'Zoology']
-      : ['Physics', 'Chemistry', 'Mathematics'];
+  const resolvedCourse = resolveCourseFromExam(params.examCategory);
+  const defaultSubjects = resolvedCourse.defaultSubjects;
 
   const id = `usr-student-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`;
   const cleanEmail =
@@ -1144,6 +1546,10 @@ export async function createStudentAccount(params: {
     batchId: params.batchId || null,
     className: params.className || 'Class 12',
     examCategory: params.examCategory,
+    courseId: resolvedCourse.courseId,
+    courseType: resolvedCourse.courseType,
+    enrollmentStatus: 'ACTIVE',
+    assignedCoursesJson: JSON.stringify(resolvedCourse.assignedCourses),
     targetYear: params.targetYear || 2026,
     subjectAccessJson: JSON.stringify(params.subjectAccess || defaultSubjects),
     testAccessJson: JSON.stringify(params.testAccess || []),
@@ -1155,6 +1561,25 @@ export async function createStudentAccount(params: {
     createdAt: new Date(),
     updatedAt: new Date(),
   });
+
+  // Also create official EnrollmentRecord(s) for the student in the enrollments table
+  for (const cType of resolvedCourse.assignedCourses) {
+    const cId =
+      cType === 'NEET' ? 'course_neet' : cType === 'JEE_ADVANCED' ? 'course_jee_adv' : 'course_jee';
+    await db
+      .insert(enrollments)
+      .values({
+        id: `enr-${id}-${cId}`,
+        studentId: id,
+        courseId: cId,
+        courseType: cType,
+        status: 'ACTIVE',
+        assignedBy: params.actor.id,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoNothing();
+  }
 
   // If batchId was specified, also add studentId to batch's studentIdsJson
   if (params.batchId) {
@@ -1176,7 +1601,7 @@ export async function createStudentAccount(params: {
     actorRole: params.actor.role,
     action: 'CREATE_STUDENT',
     target: `${params.fullName} (${studentId})`,
-    details: `Generated Student ID ${studentId} under ${params.examCategory}`,
+    details: `Generated Student ID ${studentId} & Enrolled in ${resolvedCourse.courseType} (${resolvedCourse.courseId})`,
   });
 
   const created = await getProfileById(id);
@@ -1236,7 +1661,46 @@ export async function updateProfileByStaff(params: {
   if (params.patch.teacherId !== undefined) updateData.teacherId = params.patch.teacherId;
   if (params.patch.batchId !== undefined) updateData.batchId = params.patch.batchId;
   if (params.patch.className !== undefined) updateData.className = params.patch.className;
-  if (params.patch.examCategory !== undefined) updateData.examCategory = params.patch.examCategory;
+  if (params.patch.examCategory !== undefined) {
+    updateData.examCategory = params.patch.examCategory;
+    const resolved = resolveCourseFromExam(params.patch.examCategory);
+    updateData.courseId = resolved.courseId;
+    updateData.courseType = resolved.courseType;
+    updateData.assignedCoursesJson = JSON.stringify(resolved.assignedCourses);
+    if (params.patch.subjectAccess === undefined) {
+      updateData.subjectAccessJson = JSON.stringify(resolved.defaultSubjects);
+    }
+    // Sync enrollments table for this student
+    await db.delete(enrollments).where(eq(enrollments.studentId, params.targetUserId));
+    for (const cType of resolved.assignedCourses) {
+      const cId =
+        cType === 'NEET' ? 'course_neet' : cType === 'JEE_ADVANCED' ? 'course_jee_adv' : 'course_jee';
+      await db
+        .insert(enrollments)
+        .values({
+          id: `enr-${params.targetUserId}-${cId}`,
+          studentId: params.targetUserId,
+          courseId: cId,
+          courseType: cType,
+          status: (params.patch as any).enrollmentStatus || 'ACTIVE',
+          assignedBy: params.actor.id,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .onConflictDoNothing();
+    }
+  }
+  if ((params.patch as any).enrollmentStatus !== undefined) {
+    const enrStat = (params.patch as any).enrollmentStatus as EnrollmentStatus;
+    updateData.enrollmentStatus = enrStat;
+    await db
+      .update(enrollments)
+      .set({ status: enrStat, updatedAt: new Date() })
+      .where(eq(enrollments.studentId, params.targetUserId));
+    if (enrStat !== 'ACTIVE') {
+      await revokeAllUserSessions(params.targetUserId);
+    }
+  }
   if (params.patch.targetYear !== undefined) updateData.targetYear = params.patch.targetYear;
   if (params.patch.subjectAccess !== undefined) {
     updateData.subjectAccessJson = JSON.stringify(params.patch.subjectAccess);
@@ -1462,6 +1926,8 @@ export async function getAllAnnouncements(): Promise<AnnouncementRecord[]> {
     id: r.id,
     title: r.title,
     content: r.content,
+    courseId: r.courseId || 'ALL',
+    courseType: (r.courseType as CourseType | 'ALL') || 'ALL',
     authorId: r.authorId,
     authorName: r.authorName,
     authorRole: r.authorRole as UserRole,
@@ -1475,6 +1941,7 @@ export async function getAllAnnouncements(): Promise<AnnouncementRecord[]> {
 export async function createAnnouncementRecord(params: {
   title: string;
   content: string;
+  courseType?: CourseType | 'ALL';
   targetAudience: 'ALL' | 'TEACHERS' | 'STUDENTS' | 'BATCH';
   targetBatchId?: string | null;
   priority: 'NORMAL' | 'IMPORTANT' | 'URGENT';
@@ -1482,10 +1949,24 @@ export async function createAnnouncementRecord(params: {
 }): Promise<AnnouncementRecord> {
   const id = `ann-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`;
   const now = new Date();
+  const resolvedCourseType: CourseType | 'ALL' =
+    params.courseType ||
+    (params.actor.role === 'TEACHER' ? params.actor.courseType : 'ALL');
+  const resolvedCourseId =
+    resolvedCourseType === 'NEET'
+      ? 'course_neet'
+      : resolvedCourseType === 'JEE_ADVANCED'
+      ? 'course_jee_adv'
+      : resolvedCourseType === 'JEE'
+      ? 'course_jee'
+      : 'ALL';
+
   await db.insert(announcements).values({
     id,
     title: params.title.trim(),
     content: params.content.trim(),
+    courseId: resolvedCourseId,
+    courseType: resolvedCourseType,
     authorId: params.actor.id,
     authorName: params.actor.fullName,
     authorRole: params.actor.role,
@@ -1501,13 +1982,15 @@ export async function createAnnouncementRecord(params: {
     actorRole: params.actor.role,
     action: 'PUBLISH_ANNOUNCEMENT',
     target: params.title,
-    details: `Audience: ${params.targetAudience} (${params.priority})`,
+    details: `Course: ${resolvedCourseType}, Audience: ${params.targetAudience} (${params.priority})`,
   });
 
   return {
     id,
     title: params.title.trim(),
     content: params.content.trim(),
+    courseId: resolvedCourseId,
+    courseType: resolvedCourseType,
     authorId: params.actor.id,
     authorName: params.actor.fullName,
     authorRole: params.actor.role,
@@ -1700,3 +2183,200 @@ export async function upsertTestAssignment(params: {
     createdAt: now.toISOString(),
   };
 }
+
+// ----------------- COURSES, ENROLLMENTS & STUDY MATERIALS -----------------
+
+export async function getAllCourses(): Promise<CourseRecord[]> {
+  await ensureAuthSeeded();
+  const rows = await db.select().from(courses);
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    type: r.type as CourseType,
+    description: r.description || '',
+    active: Boolean(r.active),
+    createdAt: r.createdAt ? r.createdAt.toISOString() : new Date().toISOString(),
+  }));
+}
+
+export async function getAllEnrollments(): Promise<EnrollmentRecord[]> {
+  await ensureAuthSeeded();
+  const rows = await db.select().from(enrollments).orderBy(desc(enrollments.updatedAt));
+  const allProfs = await db.select().from(profiles);
+  const stuMap = new Map<string, { fullName: string; studentId?: string | null }>();
+  allProfs.forEach((p) => stuMap.set(p.id, { fullName: p.fullName, studentId: p.studentId }));
+
+  return rows.map((e) => ({
+    id: e.id,
+    studentId: e.studentId,
+    studentName: stuMap.get(e.studentId)?.fullName || e.studentId,
+    studentCode: stuMap.get(e.studentId)?.studentId || null,
+    courseId: e.courseId,
+    courseType: e.courseType as CourseType,
+    status: (e.status as EnrollmentStatus) || 'ACTIVE',
+    assignedBy: e.assignedBy,
+    createdAt: e.createdAt ? e.createdAt.toISOString() : new Date().toISOString(),
+    updatedAt: e.updatedAt ? e.updatedAt.toISOString() : new Date().toISOString(),
+  }));
+}
+
+export async function updateStudentCourseEnrollment(params: {
+  studentId: string;
+  courseType: CourseType;
+  enrollmentStatus: EnrollmentStatus;
+  includeJeeAdvanced?: boolean;
+  actor: AuthProfile;
+}): Promise<{ success: boolean; error?: string; profile?: AuthProfile }> {
+  if (params.actor.role !== 'ADMIN' && params.actor.role !== 'TEACHER') {
+    return { success: false, error: 'Only Admin or Teacher can modify course enrollments.' };
+  }
+
+  const examCategory: ExamType =
+    params.courseType === 'NEET'
+      ? 'NEET'
+      : params.courseType === 'JEE_ADVANCED' || params.includeJeeAdvanced
+      ? 'JEE_ADVANCED'
+      : 'JEE_MAIN';
+
+  const resolved = resolveCourseFromExam(examCategory);
+
+  await db
+    .update(profiles)
+    .set({
+      examCategory,
+      courseId: resolved.courseId,
+      courseType: resolved.courseType,
+      enrollmentStatus: params.enrollmentStatus,
+      assignedCoursesJson: JSON.stringify(resolved.assignedCourses),
+      subjectAccessJson: JSON.stringify(resolved.defaultSubjects),
+      updatedAt: new Date(),
+    })
+    .where(eq(profiles.id, params.studentId));
+
+  await db.delete(enrollments).where(eq(enrollments.studentId, params.studentId));
+  for (const cType of resolved.assignedCourses) {
+    const cId =
+      cType === 'NEET' ? 'course_neet' : cType === 'JEE_ADVANCED' ? 'course_jee_adv' : 'course_jee';
+    await db
+      .insert(enrollments)
+      .values({
+        id: `enr-${params.studentId}-${cId}`,
+        studentId: params.studentId,
+        courseId: cId,
+        courseType: cType,
+        status: params.enrollmentStatus,
+        assignedBy: params.actor.id,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoNothing();
+  }
+
+  if (params.enrollmentStatus !== 'ACTIVE') {
+    await revokeAllUserSessions(params.studentId);
+  }
+
+  await createAuditLog({
+    actorId: params.actor.id,
+    actorName: params.actor.fullName,
+    actorRole: params.actor.role,
+    action: 'UPDATE_COURSE_ENROLLMENT',
+    target: params.studentId,
+    details: `Course: ${resolved.assignedCourses.join(' + ')}, Status: ${params.enrollmentStatus}`,
+  });
+
+  const updated = await getProfileById(params.studentId);
+  return { success: true, profile: updated || undefined };
+}
+
+export async function getStudyMaterialsForUser(
+  profile?: AuthProfile | null
+): Promise<StudyMaterialRecord[]> {
+  await ensureAuthSeeded();
+  const rows = await db.select().from(studyMaterials).orderBy(desc(studyMaterials.createdAt));
+  const mapped: StudyMaterialRecord[] = rows.map((r) => ({
+    id: r.id,
+    courseId: r.courseId,
+    courseType: r.courseType as CourseType,
+    subject: r.subject as SubjectName,
+    chapter: r.chapter,
+    title: r.title,
+    materialType: (r.materialType as StudyMaterialRecord['materialType']) || 'NOTES',
+    description: r.description || '',
+    contentBody: r.contentBody || '',
+    createdBy: r.createdBy,
+    createdAt: r.createdAt ? r.createdAt.toISOString() : new Date().toISOString(),
+  }));
+
+  if (!profile) return [];
+  if (profile.role === 'ADMIN') return mapped;
+
+  const allowedCourseIds = new Set(getAuthorizedCourseIds(profile));
+  const allowedCourseTypes = new Set(getAuthorizedCourseTypes(profile));
+
+  return mapped.filter(
+    (m) => allowedCourseIds.has(m.courseId) || allowedCourseTypes.has(m.courseType)
+  );
+}
+
+export async function createStudyMaterialRecord(params: {
+  courseType: CourseType;
+  subject: SubjectName;
+  chapter: string;
+  title: string;
+  materialType: StudyMaterialRecord['materialType'];
+  description: string;
+  contentBody: string;
+  actor: AuthProfile;
+}): Promise<StudyMaterialRecord> {
+  const courseId =
+    params.courseType === 'NEET'
+      ? 'course_neet'
+      : params.courseType === 'JEE_ADVANCED'
+      ? 'course_jee_adv'
+      : 'course_jee';
+  const id = `mat-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`;
+  const now = new Date();
+
+  await db.insert(studyMaterials).values({
+    id,
+    courseId,
+    courseType: params.courseType,
+    subject: params.subject,
+    chapter: params.chapter.trim(),
+    title: params.title.trim(),
+    materialType: params.materialType || 'NOTES',
+    description: params.description.trim(),
+    contentBody: params.contentBody.trim(),
+    createdBy: params.actor.id,
+    createdAt: now,
+  });
+
+  await createAuditLog({
+    actorId: params.actor.id,
+    actorName: params.actor.fullName,
+    actorRole: params.actor.role,
+    action: 'CREATE_STUDY_MATERIAL',
+    target: params.title,
+    details: `Course: ${params.courseType} (${params.subject} - ${params.chapter})`,
+  });
+
+  return {
+    id,
+    courseId,
+    courseType: params.courseType,
+    subject: params.subject,
+    chapter: params.chapter.trim(),
+    title: params.title.trim(),
+    materialType: params.materialType || 'NOTES',
+    description: params.description.trim(),
+    contentBody: params.contentBody.trim(),
+    createdBy: params.actor.id,
+    createdAt: now.toISOString(),
+  };
+}
+
+export async function deleteStudyMaterialRecord(id: string): Promise<void> {
+  await db.delete(studyMaterials).where(eq(studyMaterials.id, id));
+}
+
