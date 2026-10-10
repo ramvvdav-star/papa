@@ -168,6 +168,8 @@ export interface StudentIdConfig {
   nextJeeAdvancedSeq: number;
   nextNeetSeq: number;
   mode: 'SEQUENTIAL' | 'ALPHANUMERIC';
+  defaultMode?: 'SEQUENTIAL' | 'ALPHANUMERIC' | 'RANDOM';
+  nextSequentialNumber?: number;
 }
 
 export interface SessionRecord {
@@ -181,3 +183,14 @@ export interface SessionRecord {
   revoked: boolean;
   createdAt: string;
 }
+
+export type UserProfile = AuthProfile;
+export type AnnouncementItem = AnnouncementRecord;
+export type TestAssignmentRule = TestAssignmentRecord;
+export type PasswordRecoveryRequest = PasswordRecoveryRecord;
+export type AuditLogEntry = AuditLogRecord;
+export type StudentIdGeneratorConfig = StudentIdConfig;
+export type ExamCategory = ExamType;
+export type TeacherPermissionMatrix = TeacherPermissions;
+export type CourseEnrollmentRecord = EnrollmentRecord;
+

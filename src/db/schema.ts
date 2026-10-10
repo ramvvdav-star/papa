@@ -195,7 +195,7 @@ export const platformSettings = pgTable('platform_settings', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
-// Questions table with strict course_id & exam_type association
+// Questions table with strict course_id & exam_type association + uniqueness & usage tracking
 export const questions = pgTable('questions', {
   id: text('id').primaryKey(),
   courseId: text('course_id').default('course_jee').notNull(), // 'course_jee' | 'course_jee_adv' | 'course_neet'
@@ -207,6 +207,9 @@ export const questions = pgTable('questions', {
   difficulty: text('difficulty').notNull(),
   type: text('type').notNull(), // MCQ | NUMERICAL | MULTIPLE_CORRECT
   questionText: text('question_text').notNull(),
+  normalizedText: text('normalized_text').default('').notNull(),
+  fingerprint: text('fingerprint').default('').notNull(),
+  conceptKey: text('concept_key').default('').notNull(),
   latex: text('latex'),
   optionsJson: text('options_json'), // JSON array of options
   correctAnswer: text('correct_answer').notNull(),
@@ -218,6 +221,9 @@ export const questions = pgTable('questions', {
   status: text('status').default('PUBLISHED').notNull(), // DRAFT | APPROVED | PUBLISHED
   timesAttempted: integer('times_attempted').default(0).notNull(),
   timesCorrect: integer('times_correct').default(0).notNull(),
+  timesUsed: integer('times_used').default(0).notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  testIdsJson: text('test_ids_json').default('[]').notNull(),
   createdAt: timestamp('created_at').defaultNow(),
 }, (table) => [
   index('idx_questions_course_id').on(table.courseId),
@@ -225,9 +231,19 @@ export const questions = pgTable('questions', {
   index('idx_questions_chapter').on(table.chapter),
   index('idx_questions_difficulty').on(table.difficulty),
   index('idx_questions_status').on(table.status),
+  index('idx_questions_fingerprint').on(table.fingerprint),
 ]);
 
-// Tests table with strict course_id association
+// Global Question Usage table (Requirement 6: questionId, timesUsed, lastUsedAt, testIds)
+export const questionUsage = pgTable('question_usage', {
+  questionId: text('question_id').primaryKey(),
+  timesUsed: integer('times_used').default(0).notNull(),
+  lastUsedAt: timestamp('last_used_at'),
+  testIdsJson: text('test_ids_json').default('[]').notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Tests table with strict course_id association & saved snapshot metadata
 export const tests = pgTable('tests', {
   id: text('id').primaryKey(),
   title: text('title').notNull(),
@@ -236,6 +252,9 @@ export const tests = pgTable('tests', {
   courseType: text('course_type').default('JEE').notNull(), // 'JEE' | 'JEE_ADVANCED' | 'NEET'
   examType: text('exam_type').notNull(),
   testType: text('test_type').notNull(),
+  patternYear: integer('pattern_year').default(2026).notNull(),
+  blueprintId: text('blueprint_id'),
+  patternSource: text('pattern_source'),
   durationMinutes: integer('duration_minutes').notNull(),
   totalMarks: integer('total_marks').notNull(),
   positiveMarks: integer('positive_marks').default(4).notNull(),
@@ -244,8 +263,12 @@ export const tests = pgTable('tests', {
   questionsCount: integer('questions_count').notNull(),
   difficulty: text('difficulty').default('MEDIUM').notNull(),
   syllabusJson: text('syllabus_json'), // JSON array
+  sectionsJson: text('sections_json'), // JSON array of BlueprintSection
   description: text('description'),
-  questionIdsJson: text('question_ids_json').notNull(), // JSON array
+  questionIdsJson: text('question_ids_json').notNull(), // JSON array of snapshot questionIds
+  testQuestionsJson: text('test_questions_json').default('[]').notNull(), // JSON array of TestQuestionMapping
+  attemptSnapshotsJson: text('attempt_snapshots_json').default('[]').notNull(), // JSON array of TestAttemptSnapshot
+  activeAttemptSet: text('active_attempt_set').default('Set A').notNull(),
   published: boolean('published').default(true).notNull(),
   attemptsCount: integer('attempts_count').default(0).notNull(),
   avgScore: integer('avg_score').default(0).notNull(),
@@ -254,6 +277,20 @@ export const tests = pgTable('tests', {
   index('idx_tests_course_id').on(table.courseId),
   index('idx_tests_exam_type').on(table.examType),
   index('idx_tests_published').on(table.published),
+]);
+
+// Test Questions Snapshot Mapping table (Requirement 10: testId, questionId, questionOrder)
+export const testQuestions = pgTable('test_questions', {
+  id: text('id').primaryKey(), // `${testId}_${attemptNumber}_${questionOrder}`
+  testId: text('test_id').notNull(),
+  questionId: text('question_id').notNull(),
+  questionOrder: integer('question_order').notNull(),
+  attemptNumber: integer('attempt_number').default(1).notNull(),
+  setLabel: text('set_label').default('Set A').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => [
+  index('idx_test_questions_test_id').on(table.testId),
+  index('idx_test_questions_question_id').on(table.questionId),
 ]);
 
 // Test Attempts table with strict course_id & user_id ownership
@@ -288,3 +325,42 @@ export const testAttempts = pgTable('test_attempts', {
   index('idx_attempts_test_id').on(table.testId),
   index('idx_attempts_course_id').on(table.courseId),
 ]);
+
+// Active Exam Sessions table (Server-backed live exam snapshot & progress persistence)
+export const activeExamSessions = pgTable('active_exam_sessions', {
+  userId: text('user_id').primaryKey(),
+  testId: text('test_id').notNull(),
+  attemptSetLabel: text('attempt_set_label').default('Set A').notNull(),
+  sessionJson: text('session_json').notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// User Bookmarks table (Server-backed question bookmarks & notes)
+export const userBookmarks = pgTable('user_bookmarks', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  questionId: text('question_id').notNull(),
+  collection: text('collection').default('General Revision').notNull(),
+  note: text('note'),
+  questionJson: text('question_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => [
+  index('idx_user_bookmarks_user_id').on(table.userId),
+]);
+
+// Question Error Reports table (Server-backed student question reports)
+export const questionReports = pgTable('question_reports', {
+  id: text('id').primaryKey(),
+  questionId: text('question_id').notNull(),
+  testId: text('test_id'),
+  studentId: text('student_id').notNull(),
+  studentName: text('student_name').notNull(),
+  reason: text('reason').notNull(),
+  description: text('description').notNull(),
+  status: text('status').default('PENDING').notNull(),
+  questionSnippet: text('question_snippet'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => [
+  index('idx_question_reports_status').on(table.status),
+]);
+

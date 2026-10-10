@@ -1,14 +1,57 @@
 import { Request, Response, NextFunction } from 'express';
+import { DecodedIdToken } from 'firebase-admin/auth';
+import { adminAuth } from '../lib/firebase-admin.ts';
+import { getOrCreateUser } from '../db/users.ts';
 import {
   verifySessionToken,
+  getOrCreateFirebaseProfile,
   isCourseAuthorizedForUser,
   getAuthorizedCourseTypes,
 } from '../db/authRepository.ts';
 import { AuthProfile, UserRole } from '../types/auth.ts';
 
 export interface AuthenticatedRequest extends Request {
+  user?: DecodedIdToken;
   authProfile?: AuthProfile;
   rawToken?: string;
+}
+
+async function resolveAuthFromBearer(rawToken: string): Promise<{
+  profile?: AuthProfile;
+  decodedUser?: DecodedIdToken;
+  accountStatus?: string;
+  error?: string;
+}> {
+  // 1. Check institutional session token first if prefixed with sess_ or standard length
+  const sessionCheck = await verifySessionToken(rawToken);
+  if (sessionCheck.valid && sessionCheck.profile) {
+    return { profile: sessionCheck.profile };
+  }
+
+  // 2. Otherwise verify as a Firebase ID token and synchronize with PostgreSQL users & profiles
+  try {
+    const decodedToken = await adminAuth.verifyIdToken(rawToken);
+    if (decodedToken.uid) {
+      await getOrCreateUser(
+        decodedToken.uid,
+        decodedToken.email || '',
+        decodedToken.name || undefined
+      );
+      const { profile } = await getOrCreateFirebaseProfile({
+        uid: decodedToken.uid,
+        email: decodedToken.email || '',
+        displayName: decodedToken.name || undefined,
+      });
+      return { profile, decodedUser: decodedToken };
+    }
+  } catch {
+    // Fall back to sessionCheck error
+  }
+
+  return {
+    accountStatus: sessionCheck.accountStatus,
+    error: sessionCheck.error || 'Session invalid or expired.',
+  };
 }
 
 export const attachOptionalSessionAuth = async (
@@ -20,9 +63,10 @@ export const attachOptionalSessionAuth = async (
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const rawToken = authHeader.slice(7).trim();
     try {
-      const verification = await verifySessionToken(rawToken);
-      if (verification.valid && verification.profile) {
-        req.authProfile = verification.profile;
+      const resolved = await resolveAuthFromBearer(rawToken);
+      if (resolved.profile) {
+        req.authProfile = resolved.profile;
+        req.user = resolved.decodedUser;
         req.rawToken = rawToken;
       }
     } catch {
@@ -30,6 +74,14 @@ export const attachOptionalSessionAuth = async (
     }
   }
   next();
+};
+
+export const verifyAuth = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  return requireSessionAuth(req, res, next);
 };
 
 export const requireSessionAuth = async (
@@ -47,29 +99,30 @@ export const requireSessionAuth = async (
 
   const rawToken = authHeader.slice(7).trim();
   try {
-    const verification = await verifySessionToken(rawToken);
-    if (!verification.valid || !verification.profile) {
-      return res.status(verification.accountStatus ? 403 : 401).json({
-        error: verification.error || 'Session invalid or expired.',
-        accountStatus: verification.accountStatus,
+    const resolved = await resolveAuthFromBearer(rawToken);
+    if (!resolved.profile) {
+      return res.status(resolved.accountStatus ? 403 : 401).json({
+        error: resolved.error || 'Session invalid or expired.',
+        accountStatus: resolved.accountStatus,
         code: 'INVALID_SESSION',
       });
     }
 
     // Strict Enrollment Status check for Students (Section 1 & Section 24)
     if (
-      verification.profile.role === 'STUDENT' &&
-      verification.profile.enrollmentStatus &&
-      verification.profile.enrollmentStatus !== 'ACTIVE'
+      resolved.profile.role === 'STUDENT' &&
+      resolved.profile.enrollmentStatus &&
+      resolved.profile.enrollmentStatus !== 'ACTIVE'
     ) {
       return res.status(403).json({
-        error: `Course Enrollment ${verification.profile.enrollmentStatus} — Your enrollment in ${verification.profile.courseType} is not active.`,
+        error: `Course Enrollment ${resolved.profile.enrollmentStatus} — Your enrollment in ${resolved.profile.courseType} is not active.`,
         code: 'INACTIVE_ENROLLMENT',
-        enrollmentStatus: verification.profile.enrollmentStatus,
+        enrollmentStatus: resolved.profile.enrollmentStatus,
       });
     }
 
-    req.authProfile = verification.profile;
+    req.authProfile = resolved.profile;
+    req.user = resolved.decodedUser;
     req.rawToken = rawToken;
     next();
   } catch (err) {

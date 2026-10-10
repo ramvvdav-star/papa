@@ -52,6 +52,7 @@ export interface Question {
   questionText: string;
   latex?: string;
   diagramSvg?: string;
+  diagramCaption?: string;
   image?: string;
   hasImage?: boolean;
   options?: QuestionOption[];
@@ -199,6 +200,7 @@ export interface TestDefinition {
   subtitle: string;
   courseId?: string; // 'course_jee' | 'course_jee_adv' | 'course_neet'
   courseType?: 'JEE' | 'JEE_ADVANCED' | 'NEET';
+  exam?: ExamType;
   examType: ExamType;
   testType: TestCategoryType;
   patternYear: number;
@@ -383,13 +385,18 @@ export interface QuestionReport {
   id: string;
   questionId: string;
   testId?: string;
+  userId?: string;
+  userName?: string;
   studentName: string;
   reason: 'INCORRECT_ANSWER' | 'TYPO' | 'AMBIGUOUS' | 'BROKEN_IMAGE' | 'INCORRECT_SOLUTION' | 'OTHER';
   description: string;
-  status: 'PENDING' | 'RESOLVED' | 'DISMISSED';
+  comment?: string;
+  status: 'PENDING' | 'OPEN' | 'RESOLVED' | 'DISMISSED';
   createdAt: string;
   questionSnippet?: string;
 }
+
+export type QuestionErrorReport = QuestionReport;
 
 export interface AuditLog {
   id: string;

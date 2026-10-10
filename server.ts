@@ -28,11 +28,25 @@ import {
 import { evaluateTestAttempt } from './src/utils/evaluationEngine';
 import {
   ensureDatabaseSeeded,
+  getAllTestsFromDb,
+  saveTestToDb,
+  saveTestSnapshotMappingsToDb,
+  persistQuestionUsageToDb,
+  deleteTestFromDb,
   getQuestionsPaginated,
   createQuestionInDb,
+  updateQuestionInDb,
   deleteQuestionFromDb,
   saveAttemptToDb,
   getAttemptsFromDb,
+  getActiveSessionFromDb,
+  saveActiveSessionToDb,
+  deleteActiveSessionFromDb,
+  getUserBookmarksFromDb,
+  toggleUserBookmarkInDb,
+  getQuestionReportsFromDb,
+  createQuestionReportInDb,
+  resolveQuestionReportInDb,
 } from './src/db/repository.ts';
 import {
   ensureAuthSeeded,
@@ -76,6 +90,7 @@ import {
   getAuthorizedCourseTypes,
   getAuthorizedSubjectsForUser,
   resolveCourseFromExam,
+  getOrCreateFirebaseProfile,
 } from './src/db/authRepository.ts';
 import {
   AuthenticatedRequest,
@@ -84,6 +99,7 @@ import {
   requireRoles,
   validateCourseAccessOrReject,
 } from './src/middleware/auth.ts';
+import { adminAuth } from './src/lib/firebase-admin.ts';
 
 dotenv.config();
 
@@ -96,10 +112,15 @@ app.use(express.json({ limit: '15mb' }));
 let testsDB: TestDefinition[] = [...SEED_TESTS];
 let attemptsDB: TestAttemptResult[] = [];
 
-// Seed PostgreSQL question bank, RBAC profiles, and load historical attempts
+// Seed PostgreSQL question bank, RBAC profiles, tests snapshots, and load historical attempts
 Promise.all([
   ensureDatabaseSeeded(),
   ensureAuthSeeded(),
+  getAllTestsFromDb().then((loadedTests) => {
+    if (loadedTests.length > 0) {
+      testsDB = loadedTests;
+    }
+  }),
   getAttemptsFromDb().then((loaded) => {
     if (loaded.length > 0) {
       attemptsDB = loaded;
@@ -113,7 +134,7 @@ Promise.all([
 
 // Health check
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString() });
+  res.json({ status: 'ok', database: 'cloudsql-postgresql', time: new Date().toISOString() });
 });
 
 // POST /api/auth/login
@@ -152,7 +173,36 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// GET /api/auth/session - Verify active session token
+// POST /api/auth/google - Exchange Firebase ID token and synchronize user in PostgreSQL
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token =
+      authHeader && authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7).trim()
+        : req.body.idToken;
+    if (!token) {
+      return res.status(400).json({ error: 'Missing Firebase ID token.' });
+    }
+    const decoded = await adminAuth.verifyIdToken(token);
+    const profile = await getOrCreateFirebaseProfile({
+      uid: decoded.uid,
+      email: decoded.email || `${decoded.uid}@firebase.user`,
+      displayName: decoded.name || req.body.displayName,
+      preferredRole: req.body.role,
+      preferredCourse: req.body.courseType,
+    });
+    return res.json({
+      token,
+      profile,
+    });
+  } catch (err) {
+    console.error('Firebase Google auth error:', err);
+    return res.status(401).json({ error: 'Invalid or expired Firebase ID token.' });
+  }
+});
+
+// GET /api/auth/session - Verify active session token or Firebase ID token
 app.get('/api/auth/session', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -160,10 +210,21 @@ app.get('/api/auth/session', async (req, res) => {
   }
   const rawToken = authHeader.slice(7).trim();
   const verification = await verifySessionToken(rawToken);
-  if (!verification.valid) {
+  if (verification.valid && verification.profile) {
+    return res.json({ valid: true, profile: verification.profile });
+  }
+
+  try {
+    const decoded = await adminAuth.verifyIdToken(rawToken);
+    const profile = await getOrCreateFirebaseProfile({
+      uid: decoded.uid,
+      email: decoded.email || `${decoded.uid}@firebase.user`,
+      displayName: decoded.name,
+    });
+    return res.json({ valid: true, profile });
+  } catch {
     return res.status(verification.accountStatus ? 403 : 401).json(verification);
   }
-  return res.json({ valid: true, profile: verification.profile });
 });
 
 // POST /api/auth/logout
@@ -814,7 +875,7 @@ app.get('/api/tests/:id/questions', attachOptionalSessionAuth, (req: Authenticat
 });
 
 // POST /api/tests/:id/attempt-set - Generate or resolve multi-attempt set (Attempt 1 -> Set A, Attempt 2 -> Set B) (Requirement 12)
-app.post('/api/tests/:id/attempt-set', attachOptionalSessionAuth, (req: AuthenticatedRequest, res) => {
+app.post('/api/tests/:id/attempt-set', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
   const idx = testsDB.findIndex((t) => t.id === req.params.id || t.testId === req.params.id);
   if (idx === -1) {
     return res.status(404).json({ error: 'Test not found' });
@@ -841,8 +902,12 @@ app.post('/api/tests/:id/attempt-set', attachOptionalSessionAuth, (req: Authenti
     activeAttemptSet: resolved.setLabel,
   };
 
+  const canonicalTestId = test.testId || test.id;
+  await saveTestSnapshotMappingsToDb(canonicalTestId, resolved.testQuestions);
+  await persistQuestionUsageToDb(resolved.snapshotQuestionIds, `${canonicalTestId}_att${attemptNumber}`);
+
   res.json({
-    testId: test.testId || test.id,
+    testId: canonicalTestId,
     attemptNumber,
     setLabel: resolved.setLabel,
     snapshotQuestionIds: resolved.snapshotQuestionIds,
@@ -1092,6 +1157,7 @@ app.post(
       };
 
       testsDB.unshift(generatedTest);
+      await saveTestToDb(generatedTest);
       return res.status(201).json(generatedTest);
     } catch (err: any) {
       const msg =
@@ -1106,7 +1172,7 @@ app.post(
 app.post(
   '/api/tests',
   requireRoles(['ADMIN', 'TEACHER']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     try {
       const actor = req.authProfile!;
       if (actor.role === 'TEACHER' && !actor.teacherPermissions.canCreateTests) {
@@ -1206,6 +1272,7 @@ app.post(
       };
 
       testsDB.unshift(newTest);
+      await saveTestToDb(newTest);
       res.status(201).json(newTest);
     } catch (err: any) {
       res.status(400).json({ error: err?.message || 'Failed to create test due to duplicate question validation.' });
@@ -1217,7 +1284,7 @@ app.post(
 app.patch(
   '/api/tests/:id',
   requireRoles(['ADMIN', 'TEACHER']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const idx = testsDB.findIndex((t) => t.id === req.params.id);
     if (idx === -1) {
       return res.status(404).json({ error: 'Test not found' });
@@ -1234,6 +1301,7 @@ app.patch(
       return;
     }
     testsDB[idx] = { ...existing, ...req.body };
+    await saveTestToDb(testsDB[idx]);
     res.json(testsDB[idx]);
   }
 );
@@ -1242,7 +1310,7 @@ app.patch(
 app.delete(
   '/api/tests/:id',
   requireRoles(['ADMIN', 'TEACHER']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const existing = testsDB.find((t) => t.id === req.params.id);
     if (!existing) {
       return res.status(404).json({ error: 'Test not found' });
@@ -1258,6 +1326,7 @@ app.delete(
       return;
     }
     testsDB = testsDB.filter((t) => t.id !== req.params.id);
+    await deleteTestFromDb(req.params.id);
     res.json({ success: true });
   }
 );
@@ -1379,9 +1448,26 @@ app.post(
       });
 
       res.status(201).json(created);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error creating question:', err);
-      res.status(500).json({ error: 'Failed to create question' });
+      res.status(400).json({ error: err?.message || 'Failed to create question' });
+    }
+  }
+);
+
+// PATCH /api/questions/:id - Update question in PostgreSQL
+app.patch(
+  '/api/questions/:id',
+  requireRoles(['ADMIN', 'TEACHER']),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const updated = await updateQuestionInDb(req.params.id, req.body);
+      if (!updated) {
+        return res.status(404).json({ error: 'Question not found' });
+      }
+      res.json(updated);
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update question' });
     }
   }
 );
@@ -1399,6 +1485,83 @@ app.delete(
     }
   }
 );
+
+// ----------------- ACTIVE EXAM SESSION, BOOKMARKS & QUESTION REPORTS (POSTGRESQL) -----------------
+
+app.get('/api/active-session', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = req.authProfile?.id || (req.query.userId as string);
+  if (!userId) return res.json(null);
+  const session = await getActiveSessionFromDb(userId);
+  res.json(session);
+});
+
+app.post('/api/active-session', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = req.authProfile?.id || req.body.userId;
+  const session = req.body.session;
+  if (!userId || !session) {
+    return res.status(400).json({ error: 'userId and session are required.' });
+  }
+  await saveActiveSessionToDb(userId, session);
+  res.json({ saved: true });
+});
+
+app.delete('/api/active-session', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = req.authProfile?.id || (req.query.userId as string);
+  if (userId) {
+    await deleteActiveSessionFromDb(userId);
+  }
+  res.json({ deleted: true });
+});
+
+app.get('/api/bookmarks', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = req.authProfile?.id || (req.query.userId as string);
+  if (!userId) return res.json({ bookmarkedQuestionIds: [], questionNotes: {} });
+  const data = await getUserBookmarksFromDb(userId);
+  res.json(data);
+});
+
+app.post('/api/bookmarks/toggle', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  const userId = req.authProfile?.id || req.body.userId;
+  const { questionId, bookmarked, notes } = req.body;
+  if (!userId || !questionId) {
+    return res.status(400).json({ error: 'userId and questionId are required.' });
+  }
+  await toggleUserBookmarkInDb({
+    userId,
+    questionId,
+    bookmarked: Boolean(bookmarked),
+    notes,
+  });
+  res.json({ success: true });
+});
+
+app.get('/api/question-reports', attachOptionalSessionAuth, async (_req, res) => {
+  const reports = await getQuestionReportsFromDb();
+  res.json(reports);
+});
+
+app.post('/api/question-reports', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  const profile = req.authProfile;
+  const report = await createQuestionReportInDb({
+    id: req.body.id || `rep-${Date.now()}`,
+    questionId: req.body.questionId,
+    testId: req.body.testId || 'bank',
+    userId: profile?.id || req.body.userId || 'usr-student-rahul',
+    userName: profile?.fullName || req.body.userName || req.body.studentName || 'Student',
+    studentName: profile?.fullName || req.body.studentName || req.body.userName || 'Student',
+    reason: req.body.reason || 'OTHER',
+    description: req.body.description || req.body.comment || '',
+    comment: req.body.comment || req.body.description || '',
+    status: 'OPEN',
+    createdAt: new Date().toISOString(),
+  });
+  res.status(201).json(report);
+});
+
+app.patch('/api/question-reports/:id/resolve', requireRoles(['ADMIN', 'TEACHER']), async (req, res) => {
+  await resolveQuestionReportInDb(req.params.id);
+  res.json({ resolved: true, id: req.params.id });
+});
 
 // POST /api/evaluate - Server-side authoritative test evaluation with course verification
 app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
@@ -1423,12 +1586,13 @@ app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRe
   }
 
   const resolvedCourse = resolveCourseFromExam(targetTest.courseType || targetTest.examType);
+  const effectiveUserId = profile?.id || userId || 'usr-student-rahul';
   const rawResult = evaluateTestAttempt(
     targetTest,
     responses || {},
     (targetTest.durationMinutes || 180) * 60,
     Number(timeTakenSeconds) || 0,
-    profile?.id || userId || 'usr-student-rahul',
+    effectiveUserId,
     profile?.fullName || userName || 'Rahul Verma'
   );
 
@@ -1440,6 +1604,7 @@ app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRe
 
   attemptsDB.unshift(result);
   await saveAttemptToDb(result);
+  await deleteActiveSessionFromDb(effectiveUserId);
   res.json(result);
 });
 
@@ -1571,4 +1736,9 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
+

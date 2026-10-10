@@ -26,6 +26,7 @@ import {
 export const LoginView: React.FC = () => {
   const {
     loginWithCredentials,
+    loginWithGoogle,
     requestPasswordRecovery,
     redirectTarget,
     theme,
@@ -673,6 +674,28 @@ export const LoginView: React.FC = () => {
                       </span>
                       <ArrowRight className="w-4 h-4" />
                     </button>
+
+                    {/* Google Sign-In via Firebase Auth + PostgreSQL User Sync */}
+                    <div className="pt-2">
+                      <button
+                        type="button"
+                        disabled={isLoading}
+                        onClick={async () => {
+                          setErrorMsg(null);
+                          setAccountStatusAlert(null);
+                          setIsLoading(true);
+                          const res = await loginWithGoogle('JEE');
+                          setIsLoading(false);
+                          if (!res.success) {
+                            setErrorMsg(res.error || 'Google Sign-In failed.');
+                          }
+                        }}
+                        className="w-full py-3 px-4 rounded-xl border border-slate-700 bg-slate-900/90 hover:bg-slate-800 text-slate-200 font-bold text-xs tracking-wide transition-colors flex items-center justify-center gap-2.5 cursor-pointer"
+                      >
+                        <UserCheck className="w-4 h-4 text-sky-400" />
+                        <span>Sign In with Google (Cloud SQL Profile Sync)</span>
+                      </button>
+                    </div>
                   </form>
                 ) : (
                   /* Password Recovery Form (Section 18) */

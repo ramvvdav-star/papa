@@ -2380,3 +2380,120 @@ export async function deleteStudyMaterialRecord(id: string): Promise<void> {
   await db.delete(studyMaterials).where(eq(studyMaterials.id, id));
 }
 
+export async function getOrCreateFirebaseProfile(params: {
+  uid: string;
+  email: string;
+  displayName?: string;
+  preferredRole?: UserRole;
+  preferredCourse?: CourseType;
+}): Promise<{ profile: AuthProfile; sessionToken: string }> {
+  await ensureAuthSeeded();
+  const normalizedEmail = (params.email || `${params.uid}@firebase.user`).toLowerCase().trim();
+  const isOwnerAdmin = normalizedEmail === 'ramvvdav@gmail.com';
+  const targetRole: UserRole = params.preferredRole || (isOwnerAdmin ? 'ADMIN' : 'STUDENT');
+  const resolvedCourse = resolveCourseFromExam(params.preferredCourse || 'JEE');
+
+  // Check if profile already exists by id or email
+  const existingRows = await db
+    .select()
+    .from(profiles)
+    .where(or(eq(profiles.id, params.uid), eq(profiles.email, normalizedEmail)))
+    .limit(1);
+
+  let profileId = params.uid;
+
+  if (existingRows.length > 0) {
+    profileId = existingRows[0].id;
+    await db
+      .update(profiles)
+      .set({
+        lastLogin: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(profiles.id, profileId));
+  } else {
+    const generatedStuId =
+      targetRole === 'STUDENT'
+        ? await generateUniqueStudentId(resolvedCourse.courseType === 'NEET' ? 'NEET' : 'JEE_MAIN')
+        : null;
+
+    await db
+      .insert(profiles)
+      .values({
+        id: profileId,
+        username: normalizedEmail.split('@')[0],
+        email: normalizedEmail,
+        fullName: params.displayName || normalizedEmail.split('@')[0] || 'Candidate',
+        passwordHash: hashPassword(`Firebase#${params.uid.slice(0, 10)}!9`),
+        role: targetRole,
+        studentId: generatedStuId,
+        teacherId: targetRole === 'STUDENT' ? 'usr-teacher-verma' : null,
+        batchId: targetRole === 'STUDENT' ? 'batch-jee-main-26' : null,
+        className: targetRole === 'ADMIN' ? 'Administration' : 'Class 12',
+        examCategory: resolvedCourse.courseType === 'NEET' ? 'NEET' : 'JEE_MAIN',
+        courseId: resolvedCourse.courseId,
+        courseType: resolvedCourse.courseType,
+        enrollmentStatus: 'ACTIVE',
+        assignedCoursesJson: JSON.stringify(
+          targetRole === 'ADMIN' ? ['JEE', 'JEE_ADVANCED', 'NEET'] : resolvedCourse.assignedCourses
+        ),
+        targetYear: 2026,
+        subjectAccessJson: JSON.stringify(
+          targetRole === 'ADMIN'
+            ? ['Physics', 'Chemistry', 'Mathematics', 'Botany', 'Zoology']
+            : resolvedCourse.defaultSubjects
+        ),
+        testAccessJson: JSON.stringify(targetRole === 'ADMIN' ? ['ALL'] : []),
+        teacherPermissionsJson: JSON.stringify(DEFAULT_TEACHER_PERMS),
+        status: 'ACTIVE',
+        mustChangePassword: false,
+        tempPasswordHint: null,
+        lastLogin: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoNothing();
+
+    if (targetRole === 'STUDENT') {
+      await db
+        .insert(enrollments)
+        .values({
+          id: `enr-${profileId}-${resolvedCourse.courseId}`,
+          studentId: profileId,
+          courseId: resolvedCourse.courseId,
+          courseType: resolvedCourse.courseType,
+          status: 'ACTIVE',
+          assignedBy: 'usr-admin-1',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .onConflictDoNothing();
+    }
+  }
+
+  // Create a session token linked in auth_sessions
+  const rawToken = `sess_${crypto.randomBytes(24).toString('hex')}`;
+  const tokenHash = hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+  await db.insert(authSessions).values({
+    id: `sid-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    tokenHash,
+    userId: profileId,
+    role: existingRows[0]?.role || targetRole,
+    userAgent: 'Firebase Google Auth',
+    ipAddress: '127.0.0.1',
+    rememberMe: true,
+    expiresAt,
+    revoked: false,
+    createdAt: new Date(),
+  });
+
+  const fullProfile = await getProfileById(profileId);
+  return {
+    profile: fullProfile!,
+    sessionToken: rawToken,
+  };
+}
+
+
