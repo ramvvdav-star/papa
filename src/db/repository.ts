@@ -107,33 +107,34 @@ function mapDbRowToQuestion(row: typeof questions.$inferSelect): Question {
   });
 }
 
+let isDbSeeded = false;
+
 export async function ensureDatabaseSeeded(): Promise<number> {
   const bank = getCachedQuestionBank();
-  if (isSeeding) return bank.length;
+  if (isDbSeeded || isSeeding) return cachedQuestions.length;
 
   try {
     const countRes = await db.select({ count: sql<number>`count(*)` }).from(questions);
     const dbCount = Number(countRes[0]?.count || 0);
 
-    // Load any custom questions stored in DB that aren't in the static generator
+    // Load any custom/admin questions stored in DB without pulling all 60,000 static rows
     if (dbCount > 0) {
       try {
-        const dbRows = await db.select().from(questions);
+        const dbRows = await db
+          .select()
+          .from(questions)
+          .where(sql`${questions.id} NOT LIKE 'jee_%' AND ${questions.id} NOT LIKE 'neet_%'`)
+          .limit(500);
         const existingIds = new Set(cachedQuestions.map((q) => q.questionId || q.id));
         for (const r of dbRows) {
           const mapped = mapDbRowToQuestion(r);
-          if (mapped.timesUsed && mapped.timesUsed > 0 && mapped.testIds) {
-            for (const tId of mapped.testIds) {
-              recordQuestionUsage([mapped.questionId || mapped.id], tId, mapped.lastUsedAt || new Date().toISOString());
-            }
-          }
           if (!existingIds.has(mapped.id)) {
             cachedQuestions.unshift(mapped);
             existingIds.add(mapped.id);
           }
         }
       } catch (err) {
-        console.warn('Error loading questions from PostgreSQL:', err);
+        console.warn('Error loading custom questions from PostgreSQL:', err);
       }
     }
 
@@ -155,7 +156,7 @@ export async function ensureDatabaseSeeded(): Promise<number> {
       }
     } catch {}
 
-    if (dbCount < bank.length) {
+    if (dbCount === 0) {
       isSeeding = true;
       const chunkSize = 200;
       (async () => {
@@ -229,6 +230,7 @@ export async function ensureDatabaseSeeded(): Promise<number> {
       }
     }
 
+    isDbSeeded = true;
     return cachedQuestions.length;
   } catch (err) {
     isSeeding = false;

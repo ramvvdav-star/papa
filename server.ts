@@ -111,23 +111,36 @@ app.use(express.json({ limit: '15mb' }));
 // Runtime test definitions and attempts backed by PostgreSQL
 let testsDB: TestDefinition[] = [...SEED_TESTS];
 let attemptsDB: TestAttemptResult[] = [];
+let dbInitPromise: Promise<void> | null = null;
 
-// Seed PostgreSQL question bank, RBAC profiles, tests snapshots, and load historical attempts
-Promise.all([
-  ensureDatabaseSeeded(),
-  ensureAuthSeeded(),
-  getAllTestsFromDb().then((loadedTests) => {
-    if (loadedTests.length > 0) {
-      testsDB = loadedTests;
-    }
-  }),
-  getAttemptsFromDb().then((loaded) => {
-    if (loaded.length > 0) {
-      attemptsDB = loaded;
-    }
-  }),
-]).catch((err) => {
-  console.warn('Database initialization note:', err);
+async function ensureServerDataInitialized(): Promise<void> {
+  if (!dbInitPromise) {
+    dbInitPromise = Promise.all([
+      ensureDatabaseSeeded(),
+      ensureAuthSeeded(),
+      getAllTestsFromDb().then((loadedTests) => {
+        if (loadedTests.length > 0) {
+          testsDB = loadedTests;
+        }
+      }),
+      getAttemptsFromDb().then((loaded) => {
+        if (loaded.length > 0) {
+          attemptsDB = loaded;
+        }
+      }),
+    ])
+      .then(() => undefined)
+      .catch((err) => {
+        dbInitPromise = null;
+        console.warn('Database initialization note:', err);
+      });
+  }
+  return dbInitPromise;
+}
+
+app.use('/api', async (_req, _res, next) => {
+  await ensureServerDataInitialized();
+  next();
 });
 
 // ----------------- AUTHENTICATION & RBAC API ROUTES -----------------

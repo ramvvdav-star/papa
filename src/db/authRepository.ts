@@ -289,7 +289,7 @@ export async function getStudentIdConfig(): Promise<StudentIdConfig> {
       return { ...DEFAULT_STUDENT_ID_CONFIG, ...parseJsonSafe(rows[0].valueJson, DEFAULT_STUDENT_ID_CONFIG) };
     }
   } catch (err) {
-    console.error('Error reading student_id_config:', err);
+    console.warn('Error reading student_id_config:', err);
   }
   return DEFAULT_STUDENT_ID_CONFIG;
 }
@@ -386,7 +386,7 @@ export async function createAuditLog(params: {
       createdAt: new Date(),
     });
   } catch (err) {
-    console.error('Failed to insert audit log:', err);
+    console.warn('Failed to insert audit log:', err);
   }
 }
 
@@ -416,6 +416,13 @@ let isAuthSeeded = false;
 export async function ensureAuthSeeded(): Promise<void> {
   if (isAuthSeeded) return;
   try {
+    const existingCourses = await db.select({ id: courses.id }).from(courses).limit(1);
+    const existingProfiles = await db.select({ id: profiles.id }).from(profiles).limit(1);
+    if (existingCourses.length > 0 && existingProfiles.length > 0) {
+      isAuthSeeded = true;
+      return;
+    }
+
     const adminId = 'usr-admin-01';
     const teacher1Id = 'usr-teacher-hcverma';
     const teacher2Id = 'usr-teacher-ritusharma';
@@ -624,7 +631,6 @@ export async function ensureAuthSeeded(): Promise<void> {
       ])
       .onConflictDoNothing();
 
-    const existingProfiles = await db.select({ id: profiles.id }).from(profiles).limit(1);
     if (existingProfiles.length > 0) {
       isAuthSeeded = true;
       return;
@@ -973,7 +979,7 @@ export async function ensureAuthSeeded(): Promise<void> {
     isAuthSeeded = true;
     console.log('RBAC & Course Separation seeding complete.');
   } catch (err) {
-    console.error('Error seeding RBAC tables:', err);
+    console.warn('Note seeding RBAC tables:', err);
   }
 }
 
