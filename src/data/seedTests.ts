@@ -1,11 +1,11 @@
-import { TestDefinition } from '../types/exam';
-import { getAllFullLengthPapers, getCentralizedQuestionBank } from './fullLengthPapersGenerator';
+import type { TestDefinition } from '../types/exam.ts';
+import { getAllFullLengthPapers, getCentralizedQuestionBank } from './fullLengthPapersGenerator.ts';
 import {
   selectQuestionsIntelligent,
   createDeterministicRng,
   buildTestQuestionMappings,
   validateGeneratedTestQuestions,
-} from './questionBankEngine';
+} from './questionBankEngine.ts';
 
 const fullLengthPapers = getAllFullLengthPapers();
 const centralBank = getCentralizedQuestionBank();

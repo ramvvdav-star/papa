@@ -1,11 +1,10 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
-import { SEED_TESTS } from './src/data/seedTests';
-import { getCentralizedQuestionBank } from './src/data/fullLengthPapersGenerator';
-import { OFFICIAL_EXAM_BLUEPRINTS } from './src/data/officialExamPatterns';
+import { SEED_TESTS } from './src/data/seedTests.ts';
+import { getCentralizedQuestionBank } from './src/data/fullLengthPapersGenerator.ts';
+import { OFFICIAL_EXAM_BLUEPRINTS } from './src/data/officialExamPatterns.ts';
 import {
   selectQuestionsIntelligent,
   selectQuestionsForBlueprint,
@@ -15,8 +14,8 @@ import {
   createOrResolveAttemptSnapshot,
   auditQuestionBankAndTests,
   normalizeQuestion,
-} from './src/data/questionBankEngine';
-import {
+} from './src/data/questionBankEngine.ts';
+import type {
   Question,
   TestDefinition,
   TestAttemptResult,
@@ -24,8 +23,8 @@ import {
   ExamType,
   QuestionType,
   Difficulty,
-} from './src/types/exam';
-import { evaluateTestAttempt } from './src/utils/evaluationEngine';
+} from './src/types/exam.ts';
+import { evaluateTestAttempt } from './src/utils/evaluationEngine.ts';
 import {
   ensureDatabaseSeeded,
   getAllTestsFromDb,
@@ -93,18 +92,20 @@ import {
   getOrCreateFirebaseProfile,
 } from './src/db/authRepository.ts';
 import {
-  AuthenticatedRequest,
+  type AuthenticatedRequest,
   attachOptionalSessionAuth,
   requireSessionAuth,
   requireRoles,
   validateCourseAccessOrReject,
 } from './src/middleware/auth.ts';
 import { adminAuth } from './src/lib/firebase-admin.ts';
+import { isDatabaseReachable } from './src/db/bootstrapSchema.ts';
+import { isDatabaseConfigured } from './src/db/index.ts';
 
 dotenv.config();
 
 const app = express();
-const port = 3000;
+const port = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '15mb' }));
 
@@ -145,9 +146,14 @@ app.use('/api', async (_req, _res, next) => {
 
 // ----------------- AUTHENTICATION & RBAC API ROUTES -----------------
 
-// Health check
+// Health & Deployment Readiness check
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', database: 'cloudsql-postgresql', time: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    database: isDatabaseReachable() ? 'postgresql-connected' : 'resilient-serverless-store',
+    configured: isDatabaseConfigured(),
+    time: new Date().toISOString(),
+  });
 });
 
 // POST /api/auth/login
@@ -198,7 +204,7 @@ app.post('/api/auth/google', async (req, res) => {
       return res.status(400).json({ error: 'Missing Firebase ID token.' });
     }
     const decoded = await adminAuth.verifyIdToken(token);
-    const profile = await getOrCreateFirebaseProfile({
+    const { profile, sessionToken } = await getOrCreateFirebaseProfile({
       uid: decoded.uid,
       email: decoded.email || `${decoded.uid}@firebase.user`,
       displayName: decoded.name || req.body.displayName,
@@ -206,7 +212,7 @@ app.post('/api/auth/google', async (req, res) => {
       preferredCourse: req.body.courseType,
     });
     return res.json({
-      token,
+      token: sessionToken || token,
       profile,
     });
   } catch (err) {
@@ -224,17 +230,17 @@ app.get('/api/auth/session', async (req, res) => {
   const rawToken = authHeader.slice(7).trim();
   const verification = await verifySessionToken(rawToken);
   if (verification.valid && verification.profile) {
-    return res.json({ valid: true, profile: verification.profile });
+    return res.json({ valid: true, profile: verification.profile, token: rawToken });
   }
 
   try {
     const decoded = await adminAuth.verifyIdToken(rawToken);
-    const profile = await getOrCreateFirebaseProfile({
+    const { profile, sessionToken } = await getOrCreateFirebaseProfile({
       uid: decoded.uid,
       email: decoded.email || `${decoded.uid}@firebase.user`,
       displayName: decoded.name,
     });
-    return res.json({ valid: true, profile });
+    return res.json({ valid: true, profile, token: sessionToken });
   } catch {
     return res.status(verification.accountStatus ? 403 : 401).json(verification);
   }
@@ -1731,6 +1737,7 @@ app.get('/api/security/rls-audit', requireSessionAuth, async (_req, res) => {
 // Setup Vite or Static Serving
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

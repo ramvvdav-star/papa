@@ -1,10 +1,10 @@
-import { Question } from '../types/exam';
+import type { Question } from '../types/exam.ts';
 import {
   normalizeQuestion,
   normalizeQuestionText,
   computeQuestionFingerprint,
-} from '../data/questionBankEngine';
-import { getCentralizedQuestionBank } from '../data/fullLengthPapersGenerator';
+} from '../data/questionBankEngine.ts';
+import { getCentralizedQuestionBank } from '../data/fullLengthPapersGenerator.ts';
 
 export { normalizeQuestion, normalizeQuestionText, computeQuestionFingerprint };
 

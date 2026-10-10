@@ -1,13 +1,13 @@
-import {
+import type {
   Question,
   TestDefinition,
   SubjectName,
   ExamType,
   PYQMetadata,
-} from '../types/exam';
+} from '../types/exam.ts';
 import {
   OFFICIAL_EXAM_BLUEPRINTS,
-} from './officialExamPatterns';
+} from './officialExamPatterns.ts';
 import {
   formatCanonicalQuestionId,
   enrichQuestionRecord,
@@ -17,16 +17,16 @@ import {
   normalizeQuestion,
   buildTestQuestionMappings,
   validateGeneratedTestQuestions,
-} from './questionBankEngine';
-import { SEED_QUESTIONS } from './seedQuestions';
+} from './questionBankEngine.ts';
+import { SEED_QUESTIONS } from './seedQuestions.ts';
 import {
-  DomainGeneratorSpec,
+  type DomainGeneratorSpec,
   PHYSICS_CURRICULUM_GENERATORS,
   CHEMISTRY_CURRICULUM_GENERATORS,
   MATHEMATICS_CURRICULUM_GENERATORS,
   BOTANY_CURRICULUM_GENERATORS,
   ZOOLOGY_CURRICULUM_GENERATORS,
-} from './subjectCurriculumGenerators';
+} from './subjectCurriculumGenerators.ts';
 
 // ============================================================================
 // BUILD CENTRALIZED QUESTION BANK (REQUIREMENTS 1, 2, 3, 4, 13, 15)

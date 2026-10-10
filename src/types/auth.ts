@@ -1,4 +1,4 @@
-import { ExamType, SubjectName } from './exam';
+import type { ExamType, SubjectName } from './exam.ts';
 
 export type UserRole = 'ADMIN' | 'TEACHER' | 'STUDENT';
 

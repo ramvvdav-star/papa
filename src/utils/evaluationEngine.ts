@@ -1,4 +1,4 @@
-import { 
+import type { 
   TestDefinition, 
   UserExamResponse, 
   TestAttemptResult, 
@@ -8,7 +8,7 @@ import {
   MistakeCategoryBreakdown, 
   PracticeRecommendation,
   SubjectName
-} from '../types/exam';
+} from '../types/exam.ts';
 
 export function evaluateTestAttempt(
   test: TestDefinition,

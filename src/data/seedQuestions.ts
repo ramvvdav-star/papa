@@ -1,4 +1,4 @@
-import { Question } from '../types/exam';
+import type { Question } from '../types/exam.ts';
 
 export const SEED_QUESTIONS: Question[] = [
   // ===================== JEE & NEET PHYSICS =====================

@@ -47,7 +47,31 @@ import {
 import { auth, googleProvider } from '../lib/firebase';
 import { signInWithPopup, signOut as firebaseSignOut, onAuthStateChanged } from 'firebase/auth';
 
-let inMemoryExamSessionToken: string | null = null;
+const AUTH_TOKEN_KEY = 'nta_pulse_auth_token';
+
+function readStoredSessionToken(): string | null {
+  try {
+    return sessionStorage.getItem(AUTH_TOKEN_KEY) || localStorage.getItem(AUTH_TOKEN_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSessionToken(token: string | null, rememberMe = true): void {
+  try {
+    if (!token) {
+      sessionStorage.removeItem(AUTH_TOKEN_KEY);
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+      return;
+    }
+    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+    if (rememberMe) {
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+    }
+  } catch {}
+}
+
+let inMemoryExamSessionToken: string | null = readStoredSessionToken();
 
 export type AppView =
   | 'login'
@@ -711,7 +735,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, [sessionToken, authProfile]);
 
-  // Verify in-memory session or Firebase Auth state on mount
+  // Verify active session token or Firebase Auth state on mount
   useEffect(() => {
     let mounted = true;
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -733,8 +757,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           if (res.ok && mounted) {
             const data = await res.json();
             const profile: AuthProfile = data.profile;
-            inMemoryExamSessionToken = idToken;
-            setSessionToken(idToken);
+            const activeToken: string = data.token || idToken;
+            inMemoryExamSessionToken = activeToken;
+            writeStoredSessionToken(activeToken, true);
+            setSessionToken(activeToken);
             setAuthProfile(profile);
             setIsAuthLoading(false);
             const defaultView: AppView =
@@ -749,13 +775,42 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         } catch {}
       }
 
-      if (!inMemoryExamSessionToken) {
-        setAuthProfile(null);
-        setIsAuthLoading(false);
-        setCurrentViewInternal('login');
-      } else {
-        setIsAuthLoading(false);
+      const candidateToken = inMemoryExamSessionToken || readStoredSessionToken();
+      if (candidateToken) {
+        try {
+          const sessionRes = await fetch('/api/auth/session', {
+            headers: { Authorization: `Bearer ${candidateToken}` },
+          });
+          if (sessionRes.ok && mounted) {
+            const sessionData = await sessionRes.json();
+            if (sessionData.valid && sessionData.profile) {
+              const profile: AuthProfile = sessionData.profile;
+              inMemoryExamSessionToken = candidateToken;
+              setSessionToken(candidateToken);
+              setAuthProfile(profile);
+              setIsAuthLoading(false);
+              if (profile.mustChangePassword) {
+                setCurrentViewInternal('first-login-reset');
+                return;
+              }
+              const defaultView: AppView =
+                profile.role === 'ADMIN'
+                  ? 'admin-dashboard'
+                  : profile.role === 'TEACHER'
+                  ? 'teacher-dashboard'
+                  : 'student-dashboard';
+              setCurrentViewInternal(defaultView);
+              return;
+            }
+          }
+        } catch {}
       }
+
+      inMemoryExamSessionToken = null;
+      writeStoredSessionToken(null);
+      setAuthProfile(null);
+      setIsAuthLoading(false);
+      setCurrentViewInternal('login');
     });
 
     return () => {
@@ -796,6 +851,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const profile: AuthProfile = data.profile;
 
       inMemoryExamSessionToken = token;
+      writeStoredSessionToken(token, Boolean(params.rememberMe ?? true));
       setSessionToken(token);
       setAuthProfile(profile);
       setAccessDeniedMessage(null);
@@ -887,8 +943,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         return { success: false, error: data.error || 'Google authentication failed.' };
       }
       const profile: AuthProfile = data.profile;
-      inMemoryExamSessionToken = idToken;
-      setSessionToken(idToken);
+      const activeToken: string = data.token || idToken;
+      inMemoryExamSessionToken = activeToken;
+      writeStoredSessionToken(activeToken, true);
+      setSessionToken(activeToken);
       setAuthProfile(profile);
       setAccessDeniedMessage(null);
       const nextView: AppView =
@@ -968,6 +1026,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
     await firebaseSignOut(auth).catch(() => {});
     inMemoryExamSessionToken = null;
+    writeStoredSessionToken(null);
     setSessionToken(null);
     setAuthProfile(null);
     setAccessDeniedMessage(null);

@@ -1,11 +1,11 @@
-import {
+import type {
   Question,
   SubjectName,
   ExamType,
   Difficulty,
   QuestionType,
   PYQMetadata,
-} from '../types/exam';
+} from '../types/exam.ts';
 
 export interface DomainGeneratorSpec {
   id: string;

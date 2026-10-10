@@ -9,8 +9,9 @@ import {
   userBookmarks,
   questionReports,
 } from './schema.ts';
+import { ensureSchemaBootstrapped, isDatabaseReachable } from './bootstrapSchema.ts';
 import { eq, and, sql, desc } from 'drizzle-orm';
-import {
+import type {
   Question,
   TestDefinition,
   TestAttemptResult,
@@ -19,9 +20,9 @@ import {
   TestQuestionMapping,
   SubjectName,
   ExamType,
-} from '../types/exam';
-import { generateQuestionBank } from './questionBankGenerator';
-import { SEED_TESTS } from '../data/seedTests';
+} from '../types/exam.ts';
+import { generateQuestionBank } from './questionBankGenerator.ts';
+import { SEED_TESTS } from '../data/seedTests.ts';
 import {
   normalizeQuestion,
   computeQuestionFingerprint,
@@ -33,12 +34,18 @@ import {
   syncUsageRegistryFromTests,
   deduplicateAndMigrateQuestionBank,
   buildTestQuestionMappings,
-} from '../data/questionBankEngine';
+} from '../data/questionBankEngine.ts';
 
 // In-memory fast cache synchronized with PostgreSQL canonical Question Bank and usage registry
 let cachedQuestions: Question[] = [];
 let cachedCount = 0;
 let isSeeding = false;
+
+// Resilient runtime mirrors when PostgreSQL is warming up or not yet attached
+const memoryActiveSessions = new Map<string, ActiveExamSession>();
+const memoryBookmarks = new Map<string, { bookmarked: boolean; note: string }>();
+const memoryReports: QuestionErrorReport[] = [];
+const memoryAttempts: TestAttemptResult[] = [];
 
 export function getCachedQuestionBank(): Question[] {
   if (cachedQuestions.length === 0) {
@@ -112,6 +119,12 @@ let isDbSeeded = false;
 export async function ensureDatabaseSeeded(): Promise<number> {
   const bank = getCachedQuestionBank();
   if (isDbSeeded || isSeeding) return cachedQuestions.length;
+
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) {
+    isDbSeeded = true;
+    return cachedQuestions.length;
+  }
 
   try {
     const countRes = await db.select({ count: sql<number>`count(*)` }).from(questions);
@@ -232,7 +245,7 @@ export async function ensureDatabaseSeeded(): Promise<number> {
 
     isDbSeeded = true;
     return cachedQuestions.length;
-  } catch (err) {
+  } catch {
     isSeeding = false;
     return cachedQuestions.length;
   }
@@ -244,6 +257,9 @@ export async function persistQuestionUsageToDb(
   timestampIso: string = new Date().toISOString()
 ): Promise<void> {
   recordQuestionUsage(questionIds, testId, timestampIso);
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     for (const qId of questionIds) {
       if (!qId) continue;
@@ -274,13 +290,19 @@ export async function persistQuestionUsageToDb(
 }
 
 export async function saveTestToDb(t: TestDefinition): Promise<void> {
-  try {
-    const tId = t.testId || t.id;
-    const qIds =
-      t.snapshotQuestionIds && t.snapshotQuestionIds.length > 0
-        ? t.snapshotQuestionIds
-        : t.questions.map((q) => q.questionId || q.id);
+  await ensureSchemaBootstrapped();
+  const tId = t.testId || t.id;
+  const qIds =
+    t.snapshotQuestionIds && t.snapshotQuestionIds.length > 0
+      ? t.snapshotQuestionIds
+      : t.questions.map((q) => q.questionId || q.id);
 
+  if (!isDatabaseReachable()) {
+    recordQuestionUsage(qIds, tId, t.createdAt || new Date().toISOString());
+    return;
+  }
+
+  try {
     const mappings =
       t.testQuestions && t.testQuestions.length > 0
         ? t.testQuestions
@@ -375,6 +397,9 @@ export async function saveTestSnapshotMappingsToDb(
   mappings: TestQuestionMapping[]
 ): Promise<void> {
   if (!mappings || mappings.length === 0) return;
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     await db
       .insert(testQuestions)
@@ -395,6 +420,12 @@ export async function saveTestSnapshotMappingsToDb(
 }
 
 export async function getAllTestsFromDb(): Promise<TestDefinition[]> {
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) {
+    syncUsageRegistryFromTests(SEED_TESTS);
+    return [...SEED_TESTS];
+  }
+
   try {
     const rows = await db.select().from(tests);
     if (rows.length === 0) return [...SEED_TESTS];
@@ -507,6 +538,8 @@ export async function getAllTestsFromDb(): Promise<TestDefinition[]> {
 }
 
 export async function deleteTestFromDb(testId: string): Promise<void> {
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
   try {
     await db.delete(testQuestions).where(eq(testQuestions.testId, testId));
     await db.delete(tests).where(eq(tests.id, testId));
@@ -655,38 +688,41 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
     nextSerial
   );
 
-  try {
-    await db.insert(questions).values({
-      id: newQ.id,
-      courseId: newQ.courseId!,
-      courseType: newQ.courseType!,
-      examType: newQ.examType,
-      subject: newQ.subject,
-      chapter: newQ.chapter,
-      topic: newQ.topic,
-      difficulty: newQ.difficulty,
-      type: newQ.type,
-      questionText: newQ.questionText,
-      normalizedText: newQ.normalizedText || normInput,
-      fingerprint: newQ.fingerprint || '',
-      conceptKey: newQ.conceptKey || '',
-      latex: newQ.latex || null,
-      optionsJson: newQ.options ? JSON.stringify(newQ.options) : null,
-      correctAnswer: newQ.correctAnswer,
-      tolerance: newQ.tolerance ?? null,
-      explanation: newQ.explanation,
-      positiveMarks: newQ.positiveMarks,
-      negativeMarks: newQ.negativeMarks,
-      source: newQ.source,
-      status: newQ.status,
-      timesAttempted: 0,
-      timesCorrect: 0,
-      timesUsed: 0,
-      lastUsedAt: null,
-      testIdsJson: '[]',
-    });
-  } catch (err) {
-    console.warn('Saved question in canonical cache:', err);
+  await ensureSchemaBootstrapped();
+  if (isDatabaseReachable()) {
+    try {
+      await db.insert(questions).values({
+        id: newQ.id,
+        courseId: newQ.courseId!,
+        courseType: newQ.courseType!,
+        examType: newQ.examType,
+        subject: newQ.subject,
+        chapter: newQ.chapter,
+        topic: newQ.topic,
+        difficulty: newQ.difficulty,
+        type: newQ.type,
+        questionText: newQ.questionText,
+        normalizedText: newQ.normalizedText || normInput,
+        fingerprint: newQ.fingerprint || '',
+        conceptKey: newQ.conceptKey || '',
+        latex: newQ.latex || null,
+        optionsJson: newQ.options ? JSON.stringify(newQ.options) : null,
+        correctAnswer: newQ.correctAnswer,
+        tolerance: newQ.tolerance ?? null,
+        explanation: newQ.explanation,
+        positiveMarks: newQ.positiveMarks,
+        negativeMarks: newQ.negativeMarks,
+        source: newQ.source,
+        status: newQ.status,
+        timesAttempted: 0,
+        timesCorrect: 0,
+        timesUsed: 0,
+        lastUsedAt: null,
+        testIdsJson: '[]',
+      });
+    } catch (err) {
+      console.warn('Saved question in canonical cache:', err);
+    }
   }
 
   cachedQuestions.unshift(newQ);
@@ -712,44 +748,56 @@ export async function updateQuestionInDb(
 
   cachedQuestions[idx] = updated;
 
-  try {
-    await db
-      .update(questions)
-      .set({
-        subject: updated.subject,
-        chapter: updated.chapter,
-        topic: updated.topic,
-        difficulty: updated.difficulty,
-        type: updated.type,
-        questionText: updated.questionText,
-        normalizedText: updated.normalizedText || normalizeQuestion(updated.questionText),
-        fingerprint: updated.fingerprint || '',
-        latex: updated.latex || null,
-        optionsJson: updated.options ? JSON.stringify(updated.options) : null,
-        correctAnswer: updated.correctAnswer,
-        explanation: updated.explanation,
-        positiveMarks: updated.positiveMarks,
-        negativeMarks: updated.negativeMarks,
-        status: updated.status,
-      })
-      .where(eq(questions.id, current.id));
-  } catch (err) {
-    console.warn('Updated question in cache:', err);
+  await ensureSchemaBootstrapped();
+  if (isDatabaseReachable()) {
+    try {
+      await db
+        .update(questions)
+        .set({
+          subject: updated.subject,
+          chapter: updated.chapter,
+          topic: updated.topic,
+          difficulty: updated.difficulty,
+          type: updated.type,
+          questionText: updated.questionText,
+          normalizedText: updated.normalizedText || normalizeQuestion(updated.questionText),
+          fingerprint: updated.fingerprint || '',
+          latex: updated.latex || null,
+          optionsJson: updated.options ? JSON.stringify(updated.options) : null,
+          correctAnswer: updated.correctAnswer,
+          explanation: updated.explanation,
+          positiveMarks: updated.positiveMarks,
+          negativeMarks: updated.negativeMarks,
+          status: updated.status,
+        })
+        .where(eq(questions.id, current.id));
+    } catch (err) {
+      console.warn('Updated question in cache:', err);
+    }
   }
 
   return updated;
 }
 
 export async function deleteQuestionFromDb(id: string): Promise<boolean> {
-  try {
-    await db.delete(questions).where(eq(questions.id, id));
-  } catch {}
+  await ensureSchemaBootstrapped();
+  if (isDatabaseReachable()) {
+    try {
+      await db.delete(questions).where(eq(questions.id, id));
+    } catch {}
+  }
   cachedQuestions = cachedQuestions.filter((q) => q.id !== id && q.questionId !== id);
   cachedCount = cachedQuestions.length;
   return true;
 }
 
 export async function saveAttemptToDb(attempt: TestAttemptResult) {
+  if (!memoryAttempts.some((a) => a.id === attempt.id)) {
+    memoryAttempts.unshift(attempt);
+  }
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     await db
       .insert(testAttempts)
@@ -797,6 +845,11 @@ export async function saveAttemptToDb(attempt: TestAttemptResult) {
 }
 
 export async function getAttemptsFromDb(): Promise<TestAttemptResult[]> {
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) {
+    return [...memoryAttempts];
+  }
+
   try {
     const rows = await db.select().from(testAttempts);
     const parsed: TestAttemptResult[] = [];
@@ -811,13 +864,18 @@ export async function getAttemptsFromDb(): Promise<TestAttemptResult[]> {
     );
   } catch (err) {
     console.warn('Failed to read attempts from PostgreSQL:', err);
-    return [];
+    return [...memoryAttempts];
   }
 }
 
 // ----------------- ACTIVE EXAM SESSIONS (RESUMABLE EXAM PROGRESS IN POSTGRESQL) -----------------
 
 export async function getActiveSessionFromDb(userId: string): Promise<ActiveExamSession | null> {
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) {
+    return memoryActiveSessions.get(userId) || null;
+  }
+
   try {
     const rows = await db
       .select()
@@ -825,11 +883,10 @@ export async function getActiveSessionFromDb(userId: string): Promise<ActiveExam
       .where(eq(activeExamSessions.userId, userId))
       .orderBy(desc(activeExamSessions.updatedAt))
       .limit(1);
-    if (rows.length === 0) return null;
+    if (rows.length === 0) return memoryActiveSessions.get(userId) || null;
     return JSON.parse(rows[0].sessionJson) as ActiveExamSession;
-  } catch (err) {
-    console.warn('Error loading active exam session from PostgreSQL:', err);
-    return null;
+  } catch {
+    return memoryActiveSessions.get(userId) || null;
   }
 }
 
@@ -837,6 +894,10 @@ export async function saveActiveSessionToDb(
   userId: string,
   session: ActiveExamSession
 ): Promise<void> {
+  memoryActiveSessions.set(userId, session);
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     await db
       .insert(activeExamSessions)
@@ -862,6 +923,10 @@ export async function saveActiveSessionToDb(
 }
 
 export async function deleteActiveSessionFromDb(userId: string): Promise<void> {
+  memoryActiveSessions.delete(userId);
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     await db.delete(activeExamSessions).where(eq(activeExamSessions.userId, userId));
   } catch (err) {
@@ -875,6 +940,20 @@ export async function getUserBookmarksFromDb(userId: string): Promise<{
   bookmarkedQuestionIds: string[];
   questionNotes: Record<string, string>;
 }> {
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) {
+    const bookmarkedQuestionIds: string[] = [];
+    const questionNotes: Record<string, string> = {};
+    for (const [key, val] of memoryBookmarks.entries()) {
+      if (key.startsWith(`${userId}:`)) {
+        const qId = key.slice(userId.length + 1);
+        if (val.bookmarked) bookmarkedQuestionIds.push(qId);
+        if (val.note) questionNotes[qId] = val.note;
+      }
+    }
+    return { bookmarkedQuestionIds, questionNotes };
+  }
+
   try {
     const rows = await db
       .select()
@@ -889,8 +968,7 @@ export async function getUserBookmarksFromDb(userId: string): Promise<{
       }
     }
     return { bookmarkedQuestionIds, questionNotes };
-  } catch (err) {
-    console.warn('Error loading user bookmarks from PostgreSQL:', err);
+  } catch {
     return { bookmarkedQuestionIds: [], questionNotes: {} };
   }
 }
@@ -901,6 +979,16 @@ export async function toggleUserBookmarkInDb(params: {
   bookmarked: boolean;
   notes?: string;
 }): Promise<void> {
+  const memKey = `${params.userId}:${params.questionId}`;
+  if (!params.bookmarked && !params.notes) {
+    memoryBookmarks.delete(memKey);
+  } else {
+    memoryBookmarks.set(memKey, { bookmarked: params.bookmarked, note: params.notes || '' });
+  }
+
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     const id = `bm_${params.userId}_${params.questionId}`;
     if (!params.bookmarked && !params.notes) {
@@ -937,6 +1025,11 @@ export async function toggleUserBookmarkInDb(params: {
 // ----------------- QUESTION ERROR REPORTS IN POSTGRESQL -----------------
 
 export async function getQuestionReportsFromDb(): Promise<QuestionErrorReport[]> {
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) {
+    return [...memoryReports];
+  }
+
   try {
     const rows = await db
       .select()
@@ -955,15 +1048,18 @@ export async function getQuestionReportsFromDb(): Promise<QuestionErrorReport[]>
       status: r.status as QuestionErrorReport['status'],
       createdAt: r.createdAt ? r.createdAt.toISOString() : new Date().toISOString(),
     }));
-  } catch (err) {
-    console.warn('Error loading question reports from PostgreSQL:', err);
-    return [];
+  } catch {
+    return [...memoryReports];
   }
 }
 
 export async function createQuestionReportInDb(
   report: QuestionErrorReport
 ): Promise<QuestionErrorReport> {
+  memoryReports.unshift(report);
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return report;
+
   try {
     await db
       .insert(questionReports)
@@ -985,6 +1081,12 @@ export async function createQuestionReportInDb(
 }
 
 export async function resolveQuestionReportInDb(reportId: string): Promise<void> {
+  const rep = memoryReports.find((r) => r.id === reportId);
+  if (rep) rep.status = 'RESOLVED';
+
+  await ensureSchemaBootstrapped();
+  if (!isDatabaseReachable()) return;
+
   try {
     await db
       .update(questionReports)

@@ -1,4 +1,4 @@
-import {
+import type {
   Question,
   SubjectName,
   ExamType,
@@ -9,8 +9,8 @@ import {
   TestDefinition,
   TestAttemptSnapshot,
   TestQuestionMapping,
-} from '../types/exam';
-import { OFFICIAL_EXAM_BLUEPRINTS } from './officialExamPatterns';
+} from '../types/exam.ts';
+import { OFFICIAL_EXAM_BLUEPRINTS } from './officialExamPatterns.ts';
 
 // ============================================================================
 // PART 1 & 3: NORMALIZATION, FINGERPRINTING & CANONICAL QUESTION IDS

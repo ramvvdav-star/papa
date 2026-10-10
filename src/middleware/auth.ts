@@ -1,5 +1,5 @@
-import { Request, Response, NextFunction } from 'express';
-import { DecodedIdToken } from 'firebase-admin/auth';
+import type { Request, Response, NextFunction } from 'express';
+import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { getOrCreateUser } from '../db/users.ts';
 import {
@@ -8,7 +8,7 @@ import {
   isCourseAuthorizedForUser,
   getAuthorizedCourseTypes,
 } from '../db/authRepository.ts';
-import { AuthProfile, UserRole } from '../types/auth.ts';
+import type { AuthProfile, UserRole } from '../types/auth.ts';
 
 export interface AuthenticatedRequest extends Request {
   user?: DecodedIdToken;
@@ -22,7 +22,7 @@ async function resolveAuthFromBearer(rawToken: string): Promise<{
   accountStatus?: string;
   error?: string;
 }> {
-  // 1. Check institutional session token first if prefixed with sess_ or standard length
+  // 1. Check institutional session token first
   const sessionCheck = await verifySessionToken(rawToken);
   if (sessionCheck.valid && sessionCheck.profile) {
     return { profile: sessionCheck.profile };
