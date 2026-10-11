@@ -939,3 +939,6 @@ export async function updateQuestionReportStatusInDb(
     console.warn('Failed to update question report status in PostgreSQL:', err);
   }
 }
+
+export const getAllTestsFromDb = getTestsFromDb;
+

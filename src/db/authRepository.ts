@@ -1000,13 +1000,16 @@ export async function authenticateUser(params: {
   let matchedRows: (typeof profiles.$inferSelect)[] = [];
 
   if (params.role === 'STUDENT') {
-    // Students log in using their unique Student ID (case-insensitive match)
+    // Students log in using their unique Student ID or registered student email (case-insensitive match)
     const allStudents = await db
       .select()
       .from(profiles)
       .where(eq(profiles.role, 'STUDENT'));
     matchedRows = allStudents.filter(
-      (s) => s.studentId && s.studentId.toUpperCase() === cleanId.toUpperCase()
+      (s) =>
+        (s.studentId && s.studentId.toUpperCase() === cleanId.toUpperCase()) ||
+        (s.email && s.email.toLowerCase() === cleanId.toLowerCase()) ||
+        (s.username && s.username.toLowerCase() === cleanId.toLowerCase())
     );
   } else if (params.role === 'TEACHER') {
     const allTeachers = await db
@@ -2399,4 +2402,113 @@ export async function createStudyMaterialRecord(params: {
 export async function deleteStudyMaterialRecord(id: string): Promise<void> {
   await db.delete(studyMaterials).where(eq(studyMaterials.id, id));
 }
+
+export async function getOrCreateFirebaseProfile(params: {
+  uid: string;
+  email: string;
+  displayName?: string;
+  preferredCourse?: CourseType;
+}): Promise<{ profile: AuthProfile; token: string }> {
+  await ensureAuthSeeded();
+  const existingById = await getProfileById(params.uid);
+  if (existingById) {
+    const rawToken = `fb_${params.uid}_${crypto.randomBytes(16).toString('hex')}`;
+    const tokenHash = hashToken(rawToken);
+    await db.insert(authSessions).values({
+      id: `sess-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      tokenHash,
+      userId: existingById.id,
+      role: existingById.role,
+      userAgent: 'Firebase OAuth Client',
+      ipAddress: '127.0.0.1',
+      rememberMe: true,
+      expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      revoked: false,
+      createdAt: new Date(),
+    });
+    return { profile: existingById, token: rawToken };
+  }
+
+  const all = await getAllProfiles();
+  const existingByEmail = params.email
+    ? all.find((p) => (p.email || '').toLowerCase() === params.email.toLowerCase())
+    : undefined;
+  if (existingByEmail) {
+    const rawToken = `fb_${existingByEmail.id}_${crypto.randomBytes(16).toString('hex')}`;
+    const tokenHash = hashToken(rawToken);
+    await db.insert(authSessions).values({
+      id: `sess-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      tokenHash,
+      userId: existingByEmail.id,
+      role: existingByEmail.role,
+      userAgent: 'Firebase OAuth Client',
+      ipAddress: '127.0.0.1',
+      rememberMe: true,
+      expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      revoked: false,
+      createdAt: new Date(),
+    });
+    return { profile: existingByEmail, token: rawToken };
+  }
+
+  const resolved = resolveCourseFromExam(params.preferredCourse || 'JEE');
+  const studentId = await generateUniqueStudentId();
+  const now = new Date();
+  await db.insert(profiles).values({
+    id: params.uid,
+    username: studentId.toLowerCase(),
+    email: (params.email || `${studentId.toLowerCase()}@ntapulse.edu.in`).toLowerCase(),
+    fullName: params.displayName || 'Registered Candidate',
+    passwordHash: hashPassword(crypto.randomBytes(12).toString('hex')),
+    role: 'STUDENT',
+    studentId,
+    className: 'Class 12',
+    examCategory: resolved.courseType === 'NEET' ? 'NEET' : 'JEE_MAIN',
+    courseId: resolved.courseId,
+    courseType: resolved.courseType,
+    enrollmentStatus: 'ACTIVE',
+    assignedCoursesJson: JSON.stringify(resolved.assignedCourses),
+    targetYear: 2026,
+    subjectAccessJson: JSON.stringify(resolved.defaultSubjects),
+    testAccessJson: JSON.stringify([]),
+    teacherPermissionsJson: JSON.stringify(DEFAULT_TEACHER_PERMS),
+    status: 'ACTIVE',
+    mustChangePassword: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await db
+    .insert(enrollments)
+    .values({
+      id: `enr-${params.uid}-${resolved.courseId}`,
+      studentId: params.uid,
+      courseId: resolved.courseId,
+      courseType: resolved.courseType,
+      status: 'ACTIVE',
+      assignedBy: 'usr-admin-1',
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing();
+
+  const createdProfile = (await getProfileById(params.uid))!;
+  const rawToken = `fb_${params.uid}_${crypto.randomBytes(16).toString('hex')}`;
+  const tokenHash = hashToken(rawToken);
+  await db.insert(authSessions).values({
+    id: `sess-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    tokenHash,
+    userId: createdProfile.id,
+    role: createdProfile.role,
+    userAgent: 'Firebase OAuth Client',
+    ipAddress: '127.0.0.1',
+    rememberMe: true,
+    expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+    revoked: false,
+    createdAt: now,
+  });
+
+  return { profile: createdProfile, token: rawToken };
+}
+
 

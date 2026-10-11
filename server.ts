@@ -180,18 +180,9 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// GET /api/auth/session - Verify active session token
-app.get('/api/auth/session', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ valid: false, error: 'No session token provided.' });
-  }
-  const rawToken = authHeader.slice(7).trim();
-  const verification = await verifySessionToken(rawToken);
-  if (!verification.valid) {
-    return res.status(verification.accountStatus ? 403 : 401).json(verification);
-  }
-  return res.json({ valid: true, profile: verification.profile });
+// GET /api/auth/session - Verify active session token or Firebase ID token
+app.get('/api/auth/session', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  return res.json({ valid: true, profile: req.authProfile });
 });
 
 // POST /api/auth/logout

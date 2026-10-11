@@ -26,6 +26,7 @@ ALTER TABLE question_bookmarks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE question_reports ENABLE ROW LEVEL SECURITY;
 
 -- 2. Helper SQL Functions for Current Session User & Authorized Course IDs
+-- Uses SECURITY DEFINER + SET row_security = off to prevent recursive policy evaluation
 CREATE OR REPLACE FUNCTION app_current_user_id()
 RETURNS TEXT
 LANGUAGE sql
@@ -33,53 +34,97 @@ STABLE
 AS $$
   SELECT COALESCE(
     NULLIF(current_setting('app.current_user_id', true), ''),
-    NULLIF(current_setting('request.jwt.claim.sub', true), '')
+    NULLIF(current_setting('request.jwt.claim.sub', true), ''),
+    ''
   );
 $$;
 
 CREATE OR REPLACE FUNCTION app_current_user_role()
 RETURNS TEXT
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
+SECURITY DEFINER
+SET search_path = public
+SET row_security = off
 AS $$
-  SELECT role FROM profiles WHERE id = app_current_user_id() AND status = 'ACTIVE' LIMIT 1;
+DECLARE
+  v_uid TEXT;
+  v_jwt_role TEXT;
+  v_role TEXT;
+BEGIN
+  v_uid := app_current_user_id();
+  v_jwt_role := COALESCE(NULLIF(current_setting('request.jwt.claim.role', true), ''), '');
+
+  -- Trusted backend connection (Drizzle / pg Pool or Supabase service_role)
+  IF v_jwt_role = 'service_role' OR (v_uid = '' AND current_user NOT IN ('anon', 'authenticated')) THEN
+    RETURN 'ADMIN';
+  END IF;
+
+  IF v_uid = '' THEN
+    RETURN 'ANONYMOUS';
+  END IF;
+
+  SELECT role INTO v_role FROM public.profiles WHERE id = v_uid AND status = 'ACTIVE' LIMIT 1;
+  RETURN COALESCE(v_role, 'ANONYMOUS');
+END;
 $$;
 
 -- Returns the set of active course_ids ('course_jee', 'course_jee_adv', 'course_neet')
 -- that the currently authenticated student or teacher is authorized to access.
 CREATE OR REPLACE FUNCTION app_authorized_course_ids()
 RETURNS SETOF TEXT
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
+SECURITY DEFINER
+SET search_path = public
+SET row_security = off
 AS $$
-  -- 1. Active student enrollments from the enrollments table
-  SELECT e.course_id
-  FROM enrollments e
-  JOIN profiles p ON p.id = e.student_id
-  WHERE e.student_id = app_current_user_id()
-    AND e.status = 'ACTIVE'
-    AND p.status = 'ACTIVE'
-    AND p.enrollment_status = 'ACTIVE'
-  UNION
-  -- 2. Fallback to primary profile course_id if active
-  SELECT p.course_id
-  FROM profiles p
-  WHERE p.id = app_current_user_id()
-    AND p.status = 'ACTIVE'
-    AND p.enrollment_status = 'ACTIVE';
+DECLARE
+  v_uid TEXT;
+  v_role TEXT;
+BEGIN
+  v_role := app_current_user_role();
+  IF v_role = 'ADMIN' THEN
+    RETURN QUERY SELECT c.id FROM public.courses c;
+    RETURN;
+  END IF;
+
+  v_uid := app_current_user_id();
+  IF v_uid = '' THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+    SELECT e.course_id
+    FROM public.enrollments e
+    JOIN public.profiles p ON p.id = e.student_id
+    WHERE e.student_id = v_uid
+      AND e.status = 'ACTIVE'
+      AND p.status = 'ACTIVE'
+      AND p.enrollment_status = 'ACTIVE'
+    UNION
+    SELECT p.course_id
+    FROM public.profiles p
+    WHERE p.id = v_uid
+      AND p.status = 'ACTIVE'
+      AND p.enrollment_status = 'ACTIVE';
+END;
 $$;
 
 -- 3. COURSES TABLE POLICIES
 DROP POLICY IF EXISTS courses_select_policy ON courses;
 CREATE POLICY courses_select_policy ON courses
-  FOR SELECT
+  FOR ALL
   USING (
     app_current_user_role() = 'ADMIN'
+    OR active = true
     OR id IN (SELECT app_authorized_course_ids())
-  );
+  )
+  WITH CHECK (app_current_user_role() = 'ADMIN');
 
 -- 4. PROFILES TABLE POLICIES
 DROP POLICY IF EXISTS profiles_select_policy ON profiles;
+DROP POLICY IF EXISTS profiles_write_policy ON profiles;
 CREATE POLICY profiles_select_policy ON profiles
   FOR SELECT
   USING (
@@ -90,6 +135,10 @@ CREATE POLICY profiles_select_policy ON profiles
       AND (teacher_id = app_current_user_id() OR role = 'STUDENT')
     )
   );
+CREATE POLICY profiles_write_policy ON profiles
+  FOR ALL
+  USING (app_current_user_role() IN ('ADMIN', 'TEACHER') OR id = app_current_user_id())
+  WITH CHECK (app_current_user_role() IN ('ADMIN', 'TEACHER') OR id = app_current_user_id());
 
 -- 5. ENROLLMENTS TABLE POLICIES
 -- Students can ONLY read their own enrollments; Admins & Teachers manage enrollments.
