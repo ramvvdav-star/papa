@@ -2,50 +2,55 @@ import { db } from './index.ts';
 import {
   questions,
   tests,
-  testQuestions,
-  questionUsage,
   testAttempts,
   activeExamSessions,
-  userBookmarks,
+  questionBookmarks,
   questionReports,
 } from './schema.ts';
-import { ensureSchemaBootstrapped, isDatabaseReachable } from './bootstrapSchema.ts';
-import { eq, and, sql, desc } from 'drizzle-orm';
-import type {
+import { eq, desc, sql } from 'drizzle-orm';
+import {
   Question,
   TestDefinition,
   TestAttemptResult,
-  ActiveExamSession,
-  QuestionErrorReport,
-  TestQuestionMapping,
   SubjectName,
   ExamType,
-} from '../types/exam.ts';
-import { generateQuestionBank } from './questionBankGenerator.ts';
-import { SEED_TESTS } from '../data/seedTests.ts';
+  ActiveExamSession,
+  QuestionBookmark,
+  QuestionReport,
+} from '../types/exam';
+import { generateQuestionBank } from './questionBankGenerator';
+import { SEED_TESTS } from '../data/seedTests';
 import {
   normalizeQuestion,
   computeQuestionFingerprint,
-  computeConceptKey,
   formatCanonicalQuestionId,
   enrichQuestionRecord,
   getQuestionUsage,
-  recordQuestionUsage,
   syncUsageRegistryFromTests,
   deduplicateAndMigrateQuestionBank,
   buildTestQuestionMappings,
-} from '../data/questionBankEngine.ts';
+} from '../data/questionBankEngine';
+
+// Canonical courseId normalizer so 'course-neet-ug', 'course_neet', 'NEET', etc. map cleanly
+export function normalizeCanonicalCourse(
+  courseOrExam?: string | null,
+  fallbackExam?: ExamType
+): { courseId: 'course_jee' | 'course_jee_adv' | 'course_neet'; courseType: 'JEE' | 'JEE_ADVANCED' | 'NEET' } {
+  const raw = (courseOrExam || fallbackExam || 'JEE_MAIN').toUpperCase();
+  if (raw.includes('NEET')) {
+    return { courseId: 'course_neet', courseType: 'NEET' };
+  }
+  if (raw.includes('ADV')) {
+    return { courseId: 'course_jee_adv', courseType: 'JEE_ADVANCED' };
+  }
+  return { courseId: 'course_jee', courseType: 'JEE' };
+}
 
 // In-memory fast cache synchronized with PostgreSQL canonical Question Bank and usage registry
 let cachedQuestions: Question[] = [];
 let cachedCount = 0;
 let isSeeding = false;
-
-// Resilient runtime mirrors when PostgreSQL is warming up or not yet attached
-const memoryActiveSessions = new Map<string, ActiveExamSession>();
-const memoryBookmarks = new Map<string, { bookmarked: boolean; note: string }>();
-const memoryReports: QuestionErrorReport[] = [];
-const memoryAttempts: TestAttemptResult[] = [];
+let hasLoadedCustomDbQuestions = false;
 
 export function getCachedQuestionBank(): Question[] {
   if (cachedQuestions.length === 0) {
@@ -66,465 +71,332 @@ export function getCachedQuestionBank(): Question[] {
   });
 }
 
+// Helper to map a DB question row back to a rich Question object
 function mapDbRowToQuestion(row: typeof questions.$inferSelect): Question {
-  let options: Question['options'] = undefined;
-  let testIds: string[] = [];
-
+  let parsedOptions = undefined;
   if (row.optionsJson) {
     try {
-      options = JSON.parse(row.optionsJson);
-    } catch {}
+      parsedOptions = JSON.parse(row.optionsJson);
+    } catch {
+      parsedOptions = undefined;
+    }
   }
-  if (row.testIdsJson) {
-    try {
-      testIds = JSON.parse(row.testIdsJson);
-    } catch {}
-  }
-
+  const canonicalCourse = normalizeCanonicalCourse(row.courseId || row.courseType, row.examType as ExamType);
   return enrichQuestionRecord({
     id: row.id,
     questionId: row.id,
-    courseId: row.courseId,
-    courseType: row.courseType as 'JEE' | 'JEE_ADVANCED' | 'NEET',
-    examType: row.examType as ExamType,
-    subject: row.subject as SubjectName,
-    chapter: row.chapter,
-    topic: row.topic,
-    difficulty: row.difficulty as Question['difficulty'],
-    type: row.type as Question['type'],
+    courseId: canonicalCourse.courseId,
+    courseType: canonicalCourse.courseType,
+    examType: (row.examType as ExamType) || 'JEE_MAIN',
+    subject: (row.subject as SubjectName) || 'Physics',
+    chapter: row.chapter || 'General',
+    topic: row.topic || row.chapter || 'General',
+    difficulty: (row.difficulty as Question['difficulty']) || 'MEDIUM',
+    type: (row.type as Question['type']) || 'MCQ',
     questionText: row.questionText,
-    normalizedText: row.normalizedText || normalizeQuestion(row.questionText),
-    fingerprint: row.fingerprint || computeQuestionFingerprint(row.questionText, row.subject, row.type),
-    conceptKey: row.conceptKey || computeConceptKey(row.questionText, row.subject, row.chapter, row.topic),
     latex: row.latex || undefined,
-    options,
+    options: parsedOptions,
     correctAnswer: row.correctAnswer,
     tolerance: row.tolerance ?? undefined,
     explanation: row.explanation,
-    positiveMarks: row.positiveMarks,
-    negativeMarks: row.negativeMarks,
-    source: row.source as Question['source'],
-    status: row.status as Question['status'],
-    timesAttempted: row.timesAttempted,
-    timesCorrect: row.timesCorrect,
-    timesUsed: row.timesUsed,
-    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
-    testIds,
+    positiveMarks: row.positiveMarks ?? 4,
+    negativeMarks: row.negativeMarks ?? 1,
+    source: (row.source as Question['source']) || 'ADMIN',
+    status: (row.status as Question['status']) || 'PUBLISHED',
+    timesAttempted: row.timesAttempted || 0,
+    timesCorrect: row.timesCorrect || 0,
     createdAt: row.createdAt ? row.createdAt.toISOString() : new Date().toISOString(),
   });
 }
 
-let isDbSeeded = false;
-
 export async function ensureDatabaseSeeded(): Promise<number> {
   const bank = getCachedQuestionBank();
-  if (isDbSeeded || isSeeding) return cachedQuestions.length;
-
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) {
-    isDbSeeded = true;
-    return cachedQuestions.length;
-  }
+  if (isSeeding) return bank.length;
 
   try {
+    isSeeding = true;
+
+    // 1. Always ensure SEED_TESTS are persisted in the PostgreSQL `tests` table first!
+    const existingTestRows = await db.select({ id: tests.id }).from(tests);
+    const existingTestIds = new Set(existingTestRows.map((r) => r.id));
+
+    for (const t of SEED_TESTS) {
+      const tId = t.testId || t.id;
+      if (!existingTestIds.has(tId)) {
+        const cInfo = normalizeCanonicalCourse(t.courseId || t.courseType, t.examType);
+        await db
+          .insert(tests)
+          .values({
+            id: tId,
+            title: t.title,
+            subtitle: t.subtitle,
+            courseId: cInfo.courseId,
+            courseType: cInfo.courseType,
+            examType: t.examType,
+            testType: t.testType,
+            durationMinutes: t.durationMinutes,
+            totalMarks: t.totalMarks,
+            positiveMarks: t.positiveMarks,
+            negativeMarks: t.negativeMarks,
+            subjectsJson: JSON.stringify(t.subjects),
+            questionsCount: t.questionsCount,
+            difficulty: t.difficulty,
+            syllabusJson: JSON.stringify(t.syllabus || []),
+            description: t.description,
+            questionIdsJson: JSON.stringify((t.questions || []).map((q) => q.questionId || q.id)),
+            testDataJson: JSON.stringify(t),
+            published: t.published,
+            attemptsCount: t.attemptsCount || 0,
+            avgScore: t.avgScore || 0,
+          })
+          .onConflictDoNothing();
+      }
+    }
+
+    // 2. Check questions table count and sync any admin/teacher-created DB questions into memory cache
     const countRes = await db.select({ count: sql<number>`count(*)` }).from(questions);
     const dbCount = Number(countRes[0]?.count || 0);
 
-    // Load any custom/admin questions stored in DB without pulling all 60,000 static rows
-    if (dbCount > 0) {
+    if (!hasLoadedCustomDbQuestions && dbCount > 0) {
+      hasLoadedCustomDbQuestions = true;
+      const customRows = await db
+        .select()
+        .from(questions)
+        .where(eq(questions.source, 'ADMIN'));
+      const existingIds = new Set(cachedQuestions.map((q) => q.questionId || q.id));
+      for (const r of customRows) {
+        if (!existingIds.has(r.id)) {
+          cachedQuestions.unshift(mapDbRowToQuestion(r));
+          existingIds.add(r.id);
+        }
+      }
+      cachedCount = cachedQuestions.length;
+    }
+
+    if (dbCount >= bank.length) {
+      isSeeding = false;
+      cachedCount = Math.max(dbCount, cachedQuestions.length);
+      return cachedCount;
+    }
+
+    // Background seed remaining canonical questions
+    const chunkSize = 250;
+    (async () => {
       try {
-        const dbRows = await db
-          .select()
-          .from(questions)
-          .where(sql`${questions.id} NOT LIKE 'jee_%' AND ${questions.id} NOT LIKE 'neet_%'`)
-          .limit(500);
-        const existingIds = new Set(cachedQuestions.map((q) => q.questionId || q.id));
-        for (const r of dbRows) {
-          const mapped = mapDbRowToQuestion(r);
-          if (!existingIds.has(mapped.id)) {
-            cachedQuestions.unshift(mapped);
-            existingIds.add(mapped.id);
-          }
+        for (let i = 0; i < bank.length; i += chunkSize) {
+          const chunk = bank.slice(i, i + chunkSize);
+          await db
+            .insert(questions)
+            .values(
+              chunk.map((q) => {
+                const cInfo = normalizeCanonicalCourse(q.courseId || q.courseType, q.examType);
+                return {
+                  id: q.questionId || q.id,
+                  courseId: cInfo.courseId,
+                  courseType: cInfo.courseType,
+                  examType: q.examType,
+                  subject: q.subject,
+                  chapter: q.chapter,
+                  topic: q.topic,
+                  difficulty: q.difficulty,
+                  type: q.type,
+                  questionText: q.questionText,
+                  latex: q.latex || null,
+                  optionsJson: q.options ? JSON.stringify(q.options) : null,
+                  correctAnswer: q.correctAnswer,
+                  tolerance: q.tolerance || null,
+                  explanation: q.explanation,
+                  positiveMarks: q.positiveMarks,
+                  negativeMarks: q.negativeMarks,
+                  source: q.source,
+                  status: q.status,
+                  timesAttempted: q.timesAttempted || 0,
+                  timesCorrect: q.timesCorrect || 0,
+                };
+              })
+            )
+            .onConflictDoNothing();
         }
       } catch (err) {
-        console.warn('Error loading custom questions from PostgreSQL:', err);
+        console.warn('Database background seed note:', err);
+      } finally {
+        isSeeding = false;
       }
-    }
+    })();
 
-    // Load global question_usage records from DB
-    try {
-      const usageRows = await db.select().from(questionUsage);
-      for (const u of usageRows) {
-        let parsedTestIds: string[] = [];
-        try {
-          parsedTestIds = JSON.parse(u.testIdsJson || '[]');
-        } catch {}
-        for (const tId of parsedTestIds) {
-          recordQuestionUsage(
-            [u.questionId],
-            tId,
-            u.lastUsedAt ? u.lastUsedAt.toISOString() : new Date().toISOString()
-          );
-        }
-      }
-    } catch {}
-
-    if (dbCount === 0) {
-      isSeeding = true;
-      const chunkSize = 200;
-      (async () => {
-        try {
-          for (let i = 0; i < bank.length; i += chunkSize) {
-            const chunk = bank.slice(i, i + chunkSize);
-            await db
-              .insert(questions)
-              .values(
-                chunk.map((q) => {
-                  const qId = q.questionId || q.id;
-                  const usage = getQuestionUsage(qId, q);
-                  return {
-                    id: qId,
-                    courseId:
-                      q.courseId ||
-                      (q.examType === 'NEET'
-                        ? 'course_neet'
-                        : q.examType === 'JEE_ADVANCED'
-                        ? 'course_jee_adv'
-                        : 'course_jee'),
-                    courseType:
-                      q.courseType ||
-                      (q.examType === 'NEET'
-                        ? 'NEET'
-                        : q.examType === 'JEE_ADVANCED'
-                        ? 'JEE_ADVANCED'
-                        : 'JEE'),
-                    examType: q.examType,
-                    subject: q.subject,
-                    chapter: q.chapter,
-                    topic: q.topic,
-                    difficulty: q.difficulty,
-                    type: q.type,
-                    questionText: q.questionText,
-                    normalizedText: q.normalizedText || normalizeQuestion(q.questionText),
-                    fingerprint: q.fingerprint || computeQuestionFingerprint(q.questionText, q.subject, q.type),
-                    conceptKey: q.conceptKey || computeConceptKey(q.questionText, q.subject, q.chapter, q.topic),
-                    latex: q.latex || null,
-                    optionsJson: q.options ? JSON.stringify(q.options) : null,
-                    correctAnswer: q.correctAnswer,
-                    tolerance: q.tolerance ?? null,
-                    explanation: q.explanation,
-                    positiveMarks: q.positiveMarks,
-                    negativeMarks: q.negativeMarks,
-                    source: q.source,
-                    status: q.status,
-                    timesAttempted: q.timesAttempted || 0,
-                    timesCorrect: q.timesCorrect || 0,
-                    timesUsed: usage.timesUsed || 0,
-                    lastUsedAt: usage.lastUsedAt ? new Date(usage.lastUsedAt) : null,
-                    testIdsJson: JSON.stringify(usage.testIds || []),
-                  };
-                })
-              )
-              .onConflictDoNothing();
-          }
-        } catch (err) {
-          console.warn('Database background seed note:', err);
-        } finally {
-          isSeeding = false;
-        }
-      })();
-    }
-
-    // Seed tests and test_questions snapshots if empty
-    const testCountRes = await db.select({ count: sql<number>`count(*)` }).from(tests);
-    if (Number(testCountRes[0]?.count || 0) === 0) {
-      for (const t of SEED_TESTS) {
-        await saveTestToDb(t);
-      }
-    }
-
-    isDbSeeded = true;
-    return cachedQuestions.length;
-  } catch {
-    isSeeding = false;
-    return cachedQuestions.length;
-  }
-}
-
-export async function persistQuestionUsageToDb(
-  questionIds: string[],
-  testId: string,
-  timestampIso: string = new Date().toISOString()
-): Promise<void> {
-  recordQuestionUsage(questionIds, testId, timestampIso);
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
-  try {
-    for (const qId of questionIds) {
-      if (!qId) continue;
-      const usage = getQuestionUsage(qId);
-      const lastUsedDate = usage.lastUsedAt ? new Date(usage.lastUsedAt) : new Date();
-      await db
-        .insert(questionUsage)
-        .values({
-          questionId: qId,
-          timesUsed: usage.timesUsed,
-          lastUsedAt: lastUsedDate,
-          testIdsJson: JSON.stringify(usage.testIds),
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: questionUsage.questionId,
-          set: {
-            timesUsed: usage.timesUsed,
-            lastUsedAt: lastUsedDate,
-            testIdsJson: JSON.stringify(usage.testIds),
-            updatedAt: new Date(),
-          },
-        });
-    }
+    return bank.length;
   } catch (err) {
-    console.warn('Note persisting question usage to PostgreSQL:', err);
+    isSeeding = false;
+    return bank.length;
   }
 }
 
-export async function saveTestToDb(t: TestDefinition): Promise<void> {
-  await ensureSchemaBootstrapped();
-  const tId = t.testId || t.id;
-  const qIds =
-    t.snapshotQuestionIds && t.snapshotQuestionIds.length > 0
-      ? t.snapshotQuestionIds
-      : t.questions.map((q) => q.questionId || q.id);
-
-  if (!isDatabaseReachable()) {
-    recordQuestionUsage(qIds, tId, t.createdAt || new Date().toISOString());
-    return;
-  }
-
+// Persist a TestDefinition (created, generated, or updated) into PostgreSQL `tests` table
+export async function saveTestToDb(test: TestDefinition): Promise<void> {
   try {
-    const mappings =
-      t.testQuestions && t.testQuestions.length > 0
-        ? t.testQuestions
-        : buildTestQuestionMappings(tId, t.questions, 1, 'Set A');
+    const tId = test.testId || test.id;
+    const cInfo = normalizeCanonicalCourse(test.courseId || test.courseType, test.examType);
+    const values = {
+      id: tId,
+      title: test.title,
+      subtitle: test.subtitle || '',
+      courseId: cInfo.courseId,
+      courseType: cInfo.courseType,
+      examType: test.examType,
+      testType: test.testType,
+      durationMinutes: test.durationMinutes,
+      totalMarks: test.totalMarks,
+      positiveMarks: test.positiveMarks,
+      negativeMarks: test.negativeMarks,
+      subjectsJson: JSON.stringify(test.subjects || []),
+      questionsCount: test.questionsCount || (test.questions || []).length,
+      difficulty: test.difficulty || 'MEDIUM',
+      syllabusJson: JSON.stringify(test.syllabus || []),
+      description: test.description || '',
+      questionIdsJson: JSON.stringify((test.questions || []).map((q) => q.questionId || q.id)),
+      testDataJson: JSON.stringify({
+        ...test,
+        id: tId,
+        testId: tId,
+        courseId: cInfo.courseId,
+        courseType: cInfo.courseType,
+      }),
+      published: test.published ?? true,
+      attemptsCount: test.attemptsCount || 0,
+      avgScore: test.avgScore || 0,
+    };
 
     await db
       .insert(tests)
-      .values({
-        id: tId,
-        title: t.title,
-        subtitle: t.subtitle || '',
-        courseId:
-          t.courseId ||
-          (t.examType === 'NEET'
-            ? 'course_neet'
-            : t.examType === 'JEE_ADVANCED'
-            ? 'course_jee_adv'
-            : 'course_jee'),
-        courseType:
-          t.courseType ||
-          (t.examType === 'NEET'
-            ? 'NEET'
-            : t.examType === 'JEE_ADVANCED'
-            ? 'JEE_ADVANCED'
-            : 'JEE'),
-        examType: t.examType,
-        testType: t.testType,
-        patternYear: t.patternYear || 2026,
-        blueprintId: t.blueprintId || null,
-        patternSource: t.patternSource || null,
-        durationMinutes: t.durationMinutes,
-        totalMarks: t.totalMarks,
-        positiveMarks: t.positiveMarks,
-        negativeMarks: t.negativeMarks,
-        subjectsJson: JSON.stringify(t.subjects || []),
-        questionsCount: t.questionsCount || qIds.length,
-        difficulty: t.difficulty || 'MIXED',
-        syllabusJson: JSON.stringify(t.syllabus || []),
-        sectionsJson: t.sections ? JSON.stringify(t.sections) : null,
-        description: t.description || '',
-        questionIdsJson: JSON.stringify(qIds),
-        testQuestionsJson: JSON.stringify(mappings),
-        attemptSnapshotsJson: JSON.stringify(t.attemptSnapshots || []),
-        activeAttemptSet: t.activeAttemptSet || 'Set A',
-        published: t.published !== false,
-        attemptsCount: t.attemptsCount || 0,
-        avgScore: t.avgScore || 0,
-      })
+      .values(values)
       .onConflictDoUpdate({
         target: tests.id,
-        set: {
-          title: t.title,
-          subtitle: t.subtitle || '',
-          durationMinutes: t.durationMinutes,
-          totalMarks: t.totalMarks,
-          questionsCount: t.questionsCount || qIds.length,
-          questionIdsJson: JSON.stringify(qIds),
-          testQuestionsJson: JSON.stringify(mappings),
-          attemptSnapshotsJson: JSON.stringify(t.attemptSnapshots || []),
-          activeAttemptSet: t.activeAttemptSet || 'Set A',
-          published: t.published !== false,
-          attemptsCount: t.attemptsCount || 0,
-          avgScore: t.avgScore || 0,
-        },
+        set: values,
       });
-
-    // Save canonical test_questions rows
-    if (mappings.length > 0) {
-      await db
-        .insert(testQuestions)
-        .values(
-          mappings.map((m, idx) => ({
-            id: `${tId}_att${m.attemptNumber || 1}_q${m.questionOrder || idx + 1}`,
-            testId: tId,
-            questionId: m.questionId,
-            questionOrder: m.questionOrder || idx + 1,
-            attemptNumber: m.attemptNumber || 1,
-            setLabel: m.setLabel || 'Set A',
-          }))
-        )
-        .onConflictDoNothing();
-    }
-
-    await persistQuestionUsageToDb(qIds, tId, t.createdAt || new Date().toISOString());
   } catch (err) {
-    console.warn('Error saving test snapshot to PostgreSQL:', err);
+    console.warn('Failed to persist test to PostgreSQL:', err);
   }
 }
 
-export async function saveTestSnapshotMappingsToDb(
-  testId: string,
-  mappings: TestQuestionMapping[]
-): Promise<void> {
-  if (!mappings || mappings.length === 0) return;
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
+export async function deleteTestFromDb(testId: string): Promise<void> {
   try {
-    await db
-      .insert(testQuestions)
-      .values(
-        mappings.map((m, idx) => ({
-          id: `${testId}_att${m.attemptNumber || 1}_q${m.questionOrder || idx + 1}`,
-          testId,
-          questionId: m.questionId,
-          questionOrder: m.questionOrder || idx + 1,
-          attemptNumber: m.attemptNumber || 1,
-          setLabel: m.setLabel || `Set ${m.attemptNumber || 1}`,
-        }))
-      )
-      .onConflictDoNothing();
+    await db.delete(tests).where(eq(tests.id, testId));
   } catch (err) {
-    console.warn('Error saving test_questions mappings to PostgreSQL:', err);
+    console.warn('Failed to delete test from PostgreSQL:', err);
   }
 }
 
-export async function getAllTestsFromDb(): Promise<TestDefinition[]> {
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) {
-    syncUsageRegistryFromTests(SEED_TESTS);
-    return [...SEED_TESTS];
-  }
-
+export async function getTestsFromDb(): Promise<TestDefinition[]> {
   try {
-    const rows = await db.select().from(tests);
-    if (rows.length === 0) return [...SEED_TESTS];
-
+    const rows = await db.select().from(tests).orderBy(desc(tests.createdAt));
     const bank = getCachedQuestionBank();
-    const byId = new Map<string, Question>();
-    for (const q of bank) {
-      byId.set(q.questionId || q.id, q);
-      byId.set(q.id, q);
-    }
+    const bankMap = new Map<string, Question>();
+    bank.forEach((q) => {
+      bankMap.set(q.id, q);
+      if (q.questionId) bankMap.set(q.questionId, q);
+    });
 
-    const allMappings = await db.select().from(testQuestions);
-    const mappingsByTestId = new Map<string, TestQuestionMapping[]>();
-    for (const m of allMappings) {
-      const list = mappingsByTestId.get(m.testId) || [];
-      list.push({
-        testId: m.testId,
-        questionId: m.questionId,
-        questionOrder: m.questionOrder,
-        attemptNumber: m.attemptNumber,
-        setLabel: m.setLabel,
-      });
-      mappingsByTestId.set(m.testId, list);
-    }
+    const seedMap = new Map<string, TestDefinition>();
+    SEED_TESTS.forEach((st) => {
+      seedMap.set(st.id, st);
+      if (st.testId) seedMap.set(st.testId, st);
+    });
 
     const loadedTests: TestDefinition[] = [];
+    const seenIds = new Set<string>();
+
     for (const r of rows) {
+      if (seenIds.has(r.id)) continue;
+      seenIds.add(r.id);
+
+      if (r.testDataJson) {
+        try {
+          const parsed = JSON.parse(r.testDataJson) as TestDefinition;
+          if (parsed && Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+            const cInfo = normalizeCanonicalCourse(r.courseId || parsed.courseId, parsed.examType);
+            loadedTests.push({
+              ...parsed,
+              id: r.id,
+              testId: r.id,
+              courseId: cInfo.courseId,
+              courseType: cInfo.courseType,
+              published: r.published,
+              attemptsCount: r.attemptsCount,
+              avgScore: r.avgScore,
+            });
+            continue;
+          }
+        } catch {
+          // fallback to reconstructing from questionIdsJson
+        }
+      }
+
+      const seedMatch = seedMap.get(r.id);
+      if (seedMatch) {
+        loadedTests.push({
+          ...seedMatch,
+          published: r.published,
+          attemptsCount: r.attemptsCount || seedMatch.attemptsCount || 0,
+          avgScore: r.avgScore || seedMatch.avgScore || 0,
+        });
+        continue;
+      }
+
+      // Reconstruct from questionIdsJson
       let qIds: string[] = [];
-      let subjects: SubjectName[] = [];
-      let syllabus: string[] = [];
-      let sections: TestDefinition['sections'] = undefined;
       try {
         qIds = JSON.parse(r.questionIdsJson || '[]');
-      } catch {}
+      } catch {
+        qIds = [];
+      }
+      const resolvedQuestions = qIds
+        .map((qid) => bankMap.get(qid))
+        .filter((q): q is Question => Boolean(q));
+
+      let subjects: SubjectName[] = ['Physics', 'Chemistry', 'Mathematics'];
       try {
-        subjects = JSON.parse(r.subjectsJson || '[]');
+        subjects = JSON.parse(r.subjectsJson || '["Physics"]');
       } catch {}
+
+      let syllabus: string[] = [];
       try {
         syllabus = JSON.parse(r.syllabusJson || '[]');
       } catch {}
-      if (r.sectionsJson) {
-        try {
-          sections = JSON.parse(r.sectionsJson);
-        } catch {}
-      }
 
-      const rawMappings = (mappingsByTestId.get(r.id) || [])
-        .filter((m) => (m.attemptNumber || 1) === 1)
-        .sort((a, b) => a.questionOrder - b.questionOrder);
-
-      const orderedIds = rawMappings.length > 0 ? rawMappings.map((m) => m.questionId) : qIds;
-      const resolvedQuestions = orderedIds
-        .map((id) => byId.get(id))
-        .filter((q): q is Question => Boolean(q));
-
-      const seedMatch = SEED_TESTS.find((s) => s.id === r.id || s.testId === r.id);
-      const finalQuestions =
-        resolvedQuestions.length > 0 ? resolvedQuestions : seedMatch ? seedMatch.questions : [];
-
+      const cInfo = normalizeCanonicalCourse(r.courseId || r.courseType, r.examType as ExamType);
       loadedTests.push({
         id: r.id,
         testId: r.id,
         title: r.title,
-        subtitle: r.subtitle || '',
-        courseId: r.courseId,
-        courseType: r.courseType as 'JEE' | 'JEE_ADVANCED' | 'NEET',
-        exam: r.examType as ExamType,
-        examType: r.examType as ExamType,
-        testType: r.testType as TestDefinition['testType'],
-        patternYear: r.patternYear || 2026,
-        blueprintId: r.blueprintId || undefined,
-        patternSource: r.patternSource || undefined,
+        subtitle: r.subtitle || 'Course Assessment Paper',
+        courseId: cInfo.courseId,
+        courseType: cInfo.courseType,
+        examType: (r.examType as ExamType) || 'JEE_MAIN',
+        testType: (r.testType as TestDefinition['testType']) || 'CUSTOM',
+        patternYear: 2026,
         durationMinutes: r.durationMinutes,
         totalMarks: r.totalMarks,
         positiveMarks: r.positiveMarks,
         negativeMarks: r.negativeMarks,
         subjects,
-        questionsCount: finalQuestions.length || r.questionsCount,
-        difficulty: r.difficulty as TestDefinition['difficulty'],
+        questionsCount: resolvedQuestions.length || r.questionsCount,
+        difficulty: (r.difficulty as TestDefinition['difficulty']) || 'MEDIUM',
         syllabus,
         description: r.description || '',
-        questions: finalQuestions,
-        testQuestions:
-          rawMappings.length > 0
-            ? rawMappings
-            : buildTestQuestionMappings(r.id, finalQuestions, 1, 'Set A'),
-        snapshotQuestionIds: finalQuestions.map((q) => q.questionId || q.id),
-        sections: sections || seedMatch?.sections,
-        activeAttemptSet: r.activeAttemptSet || 'Set A',
         published: r.published,
-        createdAt: r.createdAt ? r.createdAt.toISOString().split('T')[0] : '2025-02-01',
+        questions: resolvedQuestions,
+        snapshotQuestionIds: qIds,
+        testQuestions: buildTestQuestionMappings(r.id, resolvedQuestions, 1, 'Set A'),
+        createdAt: r.createdAt ? r.createdAt.toISOString() : new Date().toISOString(),
         attemptsCount: r.attemptsCount,
         avgScore: r.avgScore,
       });
     }
 
-    const loadedIds = new Set(loadedTests.map((t) => t.id));
+    // Ensure all SEED_TESTS are present even if DB was empty on first boot
     for (const st of SEED_TESTS) {
-      if (!loadedIds.has(st.id)) {
+      const tId = st.testId || st.id;
+      if (!seenIds.has(tId) && !seenIds.has(st.id)) {
         loadedTests.push(st);
       }
     }
@@ -532,22 +404,12 @@ export async function getAllTestsFromDb(): Promise<TestDefinition[]> {
     syncUsageRegistryFromTests(loadedTests);
     return loadedTests;
   } catch (err) {
-    console.warn('Error loading tests from PostgreSQL:', err);
+    console.warn('Error loading tests from PostgreSQL, falling back to SEED_TESTS:', err);
     return [...SEED_TESTS];
   }
 }
 
-export async function deleteTestFromDb(testId: string): Promise<void> {
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-  try {
-    await db.delete(testQuestions).where(eq(testQuestions.testId, testId));
-    await db.delete(tests).where(eq(tests.id, testId));
-  } catch (err) {
-    console.warn('Error deleting test from PostgreSQL:', err);
-  }
-}
-
+// Paginated query for Question Bank with strict course isolation & usage metrics
 export async function getQuestionsPaginated(params: {
   page?: number;
   limit?: number;
@@ -569,7 +431,10 @@ export async function getQuestionsPaginated(params: {
 
   if (params.allowedCourseIds && params.allowedCourseIds.length > 0) {
     const allowedSet = new Set(params.allowedCourseIds);
-    filtered = filtered.filter((q) => q.courseId && allowedSet.has(q.courseId));
+    filtered = filtered.filter((q) => {
+      const normCourse = normalizeCanonicalCourse(q.courseId || q.courseType, q.examType);
+      return allowedSet.has(normCourse.courseId);
+    });
   }
   if (params.allowedExamTypes && params.allowedExamTypes.length > 0) {
     const allowedSet = new Set(params.allowedExamTypes);
@@ -613,6 +478,7 @@ export async function getQuestionsPaginated(params: {
   };
 }
 
+// Insert single question with canonical questionId & duplicate text prevention (Requirements 1 & 3)
 export async function createQuestionInDb(q: Partial<Question>): Promise<Question> {
   const bank = getCachedQuestionBank();
   const examType: ExamType = q.examType || 'JEE_MAIN';
@@ -651,12 +517,14 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
     canonicalId = formatCanonicalQuestionId(examType, subject, nextSerial);
   }
 
+  const canonicalCourse = normalizeCanonicalCourse(q.courseId || q.courseType, examType);
+
   const newQ = enrichQuestionRecord(
     {
       id: canonicalId,
       questionId: canonicalId,
-      courseId: q.courseId,
-      courseType: q.courseType,
+      courseId: canonicalCourse.courseId,
+      courseType: canonicalCourse.courseType,
       examType,
       subject,
       chapter: q.chapter || 'General Chapter',
@@ -665,8 +533,6 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
       type: q.type || 'MCQ',
       questionText: q.questionText || '',
       latex: q.latex,
-      diagramSvg: q.diagramSvg,
-      diagramCaption: q.diagramCaption,
       options: q.options,
       correctAnswer: q.correctAnswer || 'A',
       tolerance: q.tolerance,
@@ -675,7 +541,6 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
       negativeMarks: q.negativeMarks ?? 1,
       source: q.source || 'ADMIN',
       status: q.status || 'PUBLISHED',
-      pyqMetadata: q.pyqMetadata,
       createdAt: new Date().toISOString(),
       timesAttempted: 0,
       timesCorrect: 0,
@@ -688,13 +553,13 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
     nextSerial
   );
 
-  await ensureSchemaBootstrapped();
-  if (isDatabaseReachable()) {
-    try {
-      await db.insert(questions).values({
+  try {
+    await db
+      .insert(questions)
+      .values({
         id: newQ.id,
-        courseId: newQ.courseId!,
-        courseType: newQ.courseType!,
+        courseId: canonicalCourse.courseId,
+        courseType: canonicalCourse.courseType,
         examType: newQ.examType,
         subject: newQ.subject,
         chapter: newQ.chapter,
@@ -702,13 +567,10 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
         difficulty: newQ.difficulty,
         type: newQ.type,
         questionText: newQ.questionText,
-        normalizedText: newQ.normalizedText || normInput,
-        fingerprint: newQ.fingerprint || '',
-        conceptKey: newQ.conceptKey || '',
         latex: newQ.latex || null,
         optionsJson: newQ.options ? JSON.stringify(newQ.options) : null,
         correctAnswer: newQ.correctAnswer,
-        tolerance: newQ.tolerance ?? null,
+        tolerance: newQ.tolerance || null,
         explanation: newQ.explanation,
         positiveMarks: newQ.positiveMarks,
         negativeMarks: newQ.negativeMarks,
@@ -716,13 +578,18 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
         status: newQ.status,
         timesAttempted: 0,
         timesCorrect: 0,
-        timesUsed: 0,
-        lastUsedAt: null,
-        testIdsJson: '[]',
+      })
+      .onConflictDoUpdate({
+        target: questions.id,
+        set: {
+          questionText: newQ.questionText,
+          explanation: newQ.explanation,
+          correctAnswer: newQ.correctAnswer,
+          status: newQ.status,
+        },
       });
-    } catch (err) {
-      console.warn('Saved question in canonical cache:', err);
-    }
+  } catch (err) {
+    console.warn('Saved question in canonical cache:', err);
   }
 
   cachedQuestions.unshift(newQ);
@@ -730,113 +597,110 @@ export async function createQuestionInDb(q: Partial<Question>): Promise<Question
   return newQ;
 }
 
-export async function updateQuestionInDb(
-  id: string,
-  patch: Partial<Question>
-): Promise<Question | null> {
-  getCachedQuestionBank();
+// Update existing question in PostgreSQL & canonical cache
+export async function updateQuestionInDb(id: string, patch: Partial<Question>): Promise<Question | null> {
+  const bank = getCachedQuestionBank();
   const idx = cachedQuestions.findIndex((q) => q.id === id || q.questionId === id);
-  if (idx === -1) return null;
+  const existing = idx !== -1 ? cachedQuestions[idx] : bank.find((q) => q.id === id || q.questionId === id);
 
-  const current = cachedQuestions[idx];
-  const updated = enrichQuestionRecord({
-    ...current,
+  if (!existing) return null;
+
+  const updatedExamType = patch.examType || existing.examType;
+  const canonicalCourse = normalizeCanonicalCourse(
+    patch.courseId || patch.courseType || existing.courseId || existing.courseType,
+    updatedExamType
+  );
+
+  const merged = enrichQuestionRecord({
+    ...existing,
     ...patch,
-    id: current.id,
-    questionId: current.questionId || current.id,
+    id: existing.id,
+    questionId: existing.questionId || existing.id,
+    courseId: canonicalCourse.courseId,
+    courseType: canonicalCourse.courseType,
   });
 
-  cachedQuestions[idx] = updated;
-
-  await ensureSchemaBootstrapped();
-  if (isDatabaseReachable()) {
-    try {
-      await db
-        .update(questions)
-        .set({
-          subject: updated.subject,
-          chapter: updated.chapter,
-          topic: updated.topic,
-          difficulty: updated.difficulty,
-          type: updated.type,
-          questionText: updated.questionText,
-          normalizedText: updated.normalizedText || normalizeQuestion(updated.questionText),
-          fingerprint: updated.fingerprint || '',
-          latex: updated.latex || null,
-          optionsJson: updated.options ? JSON.stringify(updated.options) : null,
-          correctAnswer: updated.correctAnswer,
-          explanation: updated.explanation,
-          positiveMarks: updated.positiveMarks,
-          negativeMarks: updated.negativeMarks,
-          status: updated.status,
-        })
-        .where(eq(questions.id, current.id));
-    } catch (err) {
-      console.warn('Updated question in cache:', err);
-    }
+  if (idx !== -1) {
+    cachedQuestions[idx] = merged;
+  } else {
+    cachedQuestions.unshift(merged);
   }
 
-  return updated;
+  try {
+    await db
+      .update(questions)
+      .set({
+        courseId: canonicalCourse.courseId,
+        courseType: canonicalCourse.courseType,
+        examType: merged.examType,
+        subject: merged.subject,
+        chapter: merged.chapter,
+        topic: merged.topic,
+        difficulty: merged.difficulty,
+        type: merged.type,
+        questionText: merged.questionText,
+        latex: merged.latex || null,
+        optionsJson: merged.options ? JSON.stringify(merged.options) : null,
+        correctAnswer: merged.correctAnswer,
+        tolerance: merged.tolerance ?? null,
+        explanation: merged.explanation,
+        positiveMarks: merged.positiveMarks,
+        negativeMarks: merged.negativeMarks,
+        status: merged.status,
+      })
+      .where(eq(questions.id, existing.id));
+  } catch (err) {
+    console.warn('Failed to update question in PostgreSQL:', err);
+  }
+
+  return merged;
 }
 
+// Delete question
 export async function deleteQuestionFromDb(id: string): Promise<boolean> {
-  await ensureSchemaBootstrapped();
-  if (isDatabaseReachable()) {
-    try {
-      await db.delete(questions).where(eq(questions.id, id));
-    } catch {}
-  }
+  try {
+    await db.delete(questions).where(eq(questions.id, id));
+  } catch {}
   cachedQuestions = cachedQuestions.filter((q) => q.id !== id && q.questionId !== id);
   cachedCount = cachedQuestions.length;
   return true;
 }
 
+// Save Test Attempt
 export async function saveAttemptToDb(attempt: TestAttemptResult) {
-  if (!memoryAttempts.some((a) => a.id === attempt.id)) {
-    memoryAttempts.unshift(attempt);
-  }
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
   try {
+    const cInfo = normalizeCanonicalCourse(attempt.courseId || attempt.courseType, attempt.examType);
+    const enrichedAttempt: TestAttemptResult = {
+      ...attempt,
+      courseId: cInfo.courseId,
+      courseType: cInfo.courseType,
+    };
     await db
       .insert(testAttempts)
       .values({
-        id: attempt.id,
-        testId: attempt.testId,
-        testTitle: attempt.testTitle,
-        courseId:
-          attempt.courseId ||
-          (attempt.examType === 'NEET'
-            ? 'course_neet'
-            : attempt.examType === 'JEE_ADVANCED'
-            ? 'course_jee_adv'
-            : 'course_jee'),
-        courseType:
-          attempt.courseType ||
-          (attempt.examType === 'NEET'
-            ? 'NEET'
-            : attempt.examType === 'JEE_ADVANCED'
-            ? 'JEE_ADVANCED'
-            : 'JEE'),
-        examType: attempt.examType,
-        userId: attempt.userId,
-        userName: attempt.userName,
-        timeTakenSeconds: attempt.timeTakenSeconds,
-        totalScore: attempt.totalScore,
-        maxScore: attempt.maxScore,
-        percentage: attempt.percentage,
-        accuracy: attempt.accuracy,
-        attemptRate: attempt.attemptRate,
-        totalQuestions: attempt.totalQuestions,
-        totalAttempted: attempt.totalAttempted,
-        totalCorrect: attempt.totalCorrect,
-        totalIncorrect: attempt.totalIncorrect,
-        totalUnanswered: attempt.totalUnanswered,
-        negativeMarksLost: attempt.negativeMarksLost,
-        simulatedPercentile: attempt.simulatedPercentile,
-        practiceRank: attempt.practiceRank,
-        resultJson: JSON.stringify(attempt),
+        id: enrichedAttempt.id,
+        testId: enrichedAttempt.testId,
+        testTitle: enrichedAttempt.testTitle,
+        courseId: cInfo.courseId,
+        courseType: cInfo.courseType,
+        examType: enrichedAttempt.examType,
+        userId: enrichedAttempt.userId,
+        userName: enrichedAttempt.userName,
+        timeTakenSeconds: enrichedAttempt.timeTakenSeconds,
+        totalScore: enrichedAttempt.totalScore,
+        maxScore: enrichedAttempt.maxScore,
+        percentage: enrichedAttempt.percentage,
+        accuracy: enrichedAttempt.accuracy,
+        attemptRate: enrichedAttempt.attemptRate,
+        totalQuestions: enrichedAttempt.totalQuestions,
+        totalAttempted: enrichedAttempt.totalAttempted,
+        totalCorrect: enrichedAttempt.totalCorrect,
+        totalIncorrect: enrichedAttempt.totalIncorrect,
+        totalUnanswered: enrichedAttempt.totalUnanswered,
+        negativeMarksLost: enrichedAttempt.negativeMarksLost,
+        simulatedPercentile: enrichedAttempt.simulatedPercentile,
+        practiceRank: enrichedAttempt.practiceRank,
+        resultJson: JSON.stringify(enrichedAttempt),
       })
       .onConflictDoNothing();
   } catch (err) {
@@ -845,254 +709,233 @@ export async function saveAttemptToDb(attempt: TestAttemptResult) {
 }
 
 export async function getAttemptsFromDb(): Promise<TestAttemptResult[]> {
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) {
-    return [...memoryAttempts];
-  }
-
   try {
     const rows = await db.select().from(testAttempts);
     const parsed: TestAttemptResult[] = [];
     for (const r of rows) {
       try {
         const item = JSON.parse(r.resultJson) as TestAttemptResult;
-        parsed.push(item);
-      } catch {}
+        const cInfo = normalizeCanonicalCourse(r.courseId || item.courseId, r.examType as ExamType);
+        parsed.push({
+          ...item,
+          courseId: cInfo.courseId,
+          courseType: cInfo.courseType,
+        });
+      } catch {
+        // skip malformed
+      }
     }
     return parsed.sort(
       (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
     );
   } catch (err) {
     console.warn('Failed to read attempts from PostgreSQL:', err);
-    return [...memoryAttempts];
+    return [];
   }
 }
 
-// ----------------- ACTIVE EXAM SESSIONS (RESUMABLE EXAM PROGRESS IN POSTGRESQL) -----------------
+// ----------------- PERSISTENT ACTIVE EXAM SESSIONS (CROSS-DEVICE AUTOSAVE) -----------------
 
-export async function getActiveSessionFromDb(userId: string): Promise<ActiveExamSession | null> {
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) {
-    return memoryActiveSessions.get(userId) || null;
-  }
-
+export async function getActiveExamSessionFromDb(userId: string): Promise<ActiveExamSession | null> {
   try {
     const rows = await db
       .select()
       .from(activeExamSessions)
-      .where(eq(activeExamSessions.userId, userId))
-      .orderBy(desc(activeExamSessions.updatedAt))
-      .limit(1);
-    if (rows.length === 0) return memoryActiveSessions.get(userId) || null;
+      .where(eq(activeExamSessions.userId, userId));
+    if (rows.length === 0) return null;
     return JSON.parse(rows[0].sessionJson) as ActiveExamSession;
-  } catch {
-    return memoryActiveSessions.get(userId) || null;
+  } catch (err) {
+    console.warn('Failed to load active exam session from PostgreSQL:', err);
+    return null;
   }
 }
 
-export async function saveActiveSessionToDb(
+export async function saveActiveExamSessionToDb(
   userId: string,
-  session: ActiveExamSession
+  session: ActiveExamSession,
+  courseId = 'course_jee'
 ): Promise<void> {
-  memoryActiveSessions.set(userId, session);
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
   try {
+    const payload = {
+      userId,
+      testId: session.testId,
+      courseId,
+      examMode: session.examMode || 'SIMULATION',
+      timerSecondsLeft: Math.max(0, Math.round(session.timerSecondsLeft || 0)),
+      currentQuestionIdx: session.currentQuestionIdx || 0,
+      sessionJson: JSON.stringify(session),
+      updatedAt: new Date(),
+    };
     await db
       .insert(activeExamSessions)
-      .values({
-        userId,
-        testId: session.testId,
-        attemptSetLabel: session.attemptSetLabel || 'Set A',
-        sessionJson: JSON.stringify(session),
-        updatedAt: new Date(),
-      })
+      .values(payload)
       .onConflictDoUpdate({
         target: activeExamSessions.userId,
-        set: {
-          testId: session.testId,
-          attemptSetLabel: session.attemptSetLabel || 'Set A',
-          sessionJson: JSON.stringify(session),
-          updatedAt: new Date(),
-        },
+        set: payload,
       });
   } catch (err) {
-    console.warn('Error saving active exam session to PostgreSQL:', err);
+    console.warn('Failed to save active exam session to PostgreSQL:', err);
   }
 }
 
-export async function deleteActiveSessionFromDb(userId: string): Promise<void> {
-  memoryActiveSessions.delete(userId);
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
+export async function deleteActiveExamSessionFromDb(userId: string): Promise<void> {
   try {
     await db.delete(activeExamSessions).where(eq(activeExamSessions.userId, userId));
   } catch (err) {
-    console.warn('Error deleting active exam session from PostgreSQL:', err);
+    console.warn('Failed to delete active exam session from PostgreSQL:', err);
   }
 }
 
-// ----------------- USER BOOKMARKS IN POSTGRESQL -----------------
+// ----------------- PERSISTENT QUESTION BOOKMARKS -----------------
 
-export async function getUserBookmarksFromDb(userId: string): Promise<{
-  bookmarkedQuestionIds: string[];
-  questionNotes: Record<string, string>;
-}> {
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) {
-    const bookmarkedQuestionIds: string[] = [];
-    const questionNotes: Record<string, string> = {};
-    for (const [key, val] of memoryBookmarks.entries()) {
-      if (key.startsWith(`${userId}:`)) {
-        const qId = key.slice(userId.length + 1);
-        if (val.bookmarked) bookmarkedQuestionIds.push(qId);
-        if (val.note) questionNotes[qId] = val.note;
-      }
-    }
-    return { bookmarkedQuestionIds, questionNotes };
-  }
-
+export async function getBookmarksForUserFromDb(userId: string): Promise<QuestionBookmark[]> {
   try {
     const rows = await db
       .select()
-      .from(userBookmarks)
-      .where(eq(userBookmarks.userId, userId));
-    const bookmarkedQuestionIds: string[] = [];
-    const questionNotes: Record<string, string> = {};
-    for (const r of rows) {
-      bookmarkedQuestionIds.push(r.questionId);
-      if (r.note) {
-        questionNotes[r.questionId] = r.note;
+      .from(questionBookmarks)
+      .where(eq(questionBookmarks.userId, userId))
+      .orderBy(desc(questionBookmarks.createdAt));
+
+    const bank = getCachedQuestionBank();
+    const bankMap = new Map<string, Question>();
+    bank.forEach((q) => {
+      bankMap.set(q.id, q);
+      if (q.questionId) bankMap.set(q.questionId, q);
+    });
+
+    return rows.map((r) => {
+      let questionObj = bankMap.get(r.questionId);
+      if (!questionObj && r.questionJson) {
+        try {
+          questionObj = JSON.parse(r.questionJson) as Question;
+        } catch {}
       }
-    }
-    return { bookmarkedQuestionIds, questionNotes };
-  } catch {
-    return { bookmarkedQuestionIds: [], questionNotes: {} };
+      return {
+        id: r.id,
+        questionId: r.questionId,
+        collection: r.collection,
+        note: r.note || undefined,
+        createdAt: r.createdAt.toISOString(),
+        question: questionObj,
+      };
+    });
+  } catch (err) {
+    console.warn('Failed to load bookmarks from PostgreSQL:', err);
+    return [];
   }
 }
 
-export async function toggleUserBookmarkInDb(params: {
-  userId: string;
-  questionId: string;
-  bookmarked: boolean;
-  notes?: string;
-}): Promise<void> {
-  const memKey = `${params.userId}:${params.questionId}`;
-  if (!params.bookmarked && !params.notes) {
-    memoryBookmarks.delete(memKey);
-  } else {
-    memoryBookmarks.set(memKey, { bookmarked: params.bookmarked, note: params.notes || '' });
-  }
-
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
+export async function upsertBookmarkInDb(
+  userId: string,
+  bookmark: QuestionBookmark,
+  courseId = 'course_jee'
+): Promise<QuestionBookmark> {
+  const id = bookmark.id || `bm-${userId}-${bookmark.questionId}`;
   try {
-    const id = `bm_${params.userId}_${params.questionId}`;
-    if (!params.bookmarked && !params.notes) {
-      await db
-        .delete(userBookmarks)
-        .where(
-          and(
-            eq(userBookmarks.userId, params.userId),
-            eq(userBookmarks.questionId, params.questionId)
-          )
-        );
-      return;
-    }
+    const values = {
+      id,
+      userId,
+      questionId: bookmark.questionId,
+      courseId,
+      collection: bookmark.collection || 'Important Revision',
+      note: bookmark.note || '',
+      questionJson: bookmark.question ? JSON.stringify(bookmark.question) : null,
+      createdAt: new Date(bookmark.createdAt || Date.now()),
+    };
     await db
-      .insert(userBookmarks)
-      .values({
-        id,
-        userId: params.userId,
-        questionId: params.questionId,
-        collection: 'General Revision',
-        note: params.notes || '',
-      })
+      .insert(questionBookmarks)
+      .values(values)
       .onConflictDoUpdate({
-        target: userBookmarks.id,
+        target: questionBookmarks.id,
         set: {
-          note: params.notes ?? '',
+          collection: values.collection,
+          note: values.note,
+          questionJson: values.questionJson,
         },
       });
   } catch (err) {
-    console.warn('Error toggling user bookmark in PostgreSQL:', err);
+    console.warn('Failed to save bookmark to PostgreSQL:', err);
+  }
+  return { ...bookmark, id };
+}
+
+export async function deleteBookmarkFromDb(userId: string, questionId: string): Promise<void> {
+  try {
+    const rows = await db
+      .select()
+      .from(questionBookmarks)
+      .where(eq(questionBookmarks.userId, userId));
+    const target = rows.find((r) => r.questionId === questionId || r.id === questionId);
+    if (target) {
+      await db.delete(questionBookmarks).where(eq(questionBookmarks.id, target.id));
+    }
+  } catch (err) {
+    console.warn('Failed to delete bookmark from PostgreSQL:', err);
   }
 }
 
-// ----------------- QUESTION ERROR REPORTS IN POSTGRESQL -----------------
+// ----------------- PERSISTENT QUESTION ERROR REPORTS -----------------
 
-export async function getQuestionReportsFromDb(): Promise<QuestionErrorReport[]> {
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) {
-    return [...memoryReports];
-  }
-
+export async function getQuestionReportsFromDb(): Promise<QuestionReport[]> {
   try {
     const rows = await db
       .select()
       .from(questionReports)
       .orderBy(desc(questionReports.createdAt));
+
     return rows.map((r) => ({
       id: r.id,
       questionId: r.questionId,
-      testId: r.testId || 'bank',
-      userId: r.studentId,
-      userName: r.studentName,
+      testId: r.testId || undefined,
       studentName: r.studentName,
-      reason: r.reason as QuestionErrorReport['reason'],
+      reason: r.reason as QuestionReport['reason'],
       description: r.description,
-      comment: r.description,
-      status: r.status as QuestionErrorReport['status'],
-      createdAt: r.createdAt ? r.createdAt.toISOString() : new Date().toISOString(),
+      status: (r.status as QuestionReport['status']) || 'PENDING',
+      createdAt: r.createdAt.toISOString(),
+      questionSnippet: r.questionSnippet || undefined,
     }));
-  } catch {
-    return [...memoryReports];
+  } catch (err) {
+    console.warn('Failed to load question reports from PostgreSQL:', err);
+    return [];
   }
 }
 
 export async function createQuestionReportInDb(
-  report: QuestionErrorReport
-): Promise<QuestionErrorReport> {
-  memoryReports.unshift(report);
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return report;
-
+  userId: string,
+  report: QuestionReport
+): Promise<QuestionReport> {
   try {
     await db
       .insert(questionReports)
       .values({
         id: report.id,
         questionId: report.questionId,
-        testId: report.testId || 'bank',
-        studentId: report.userId || 'usr-student-rahul',
-        studentName: report.studentName || report.userName || 'Student',
-        reason: report.reason || 'OTHER',
-        description: report.description || report.comment || '',
+        testId: report.testId || null,
+        userId,
+        studentName: report.studentName,
+        reason: report.reason,
+        description: report.description,
         status: report.status || 'PENDING',
+        questionSnippet: report.questionSnippet || null,
+        createdAt: new Date(report.createdAt || Date.now()),
       })
       .onConflictDoNothing();
   } catch (err) {
-    console.warn('Error saving question report to PostgreSQL:', err);
+    console.warn('Failed to save question report to PostgreSQL:', err);
   }
   return report;
 }
 
-export async function resolveQuestionReportInDb(reportId: string): Promise<void> {
-  const rep = memoryReports.find((r) => r.id === reportId);
-  if (rep) rep.status = 'RESOLVED';
-
-  await ensureSchemaBootstrapped();
-  if (!isDatabaseReachable()) return;
-
+export async function updateQuestionReportStatusInDb(
+  reportId: string,
+  status: 'RESOLVED' | 'DISMISSED'
+): Promise<void> {
   try {
     await db
       .update(questionReports)
-      .set({ status: 'RESOLVED' })
+      .set({ status })
       .where(eq(questionReports.id, reportId));
   } catch (err) {
-    console.warn('Error resolving question report in PostgreSQL:', err);
+    console.warn('Failed to update question report status in PostgreSQL:', err);
   }
 }

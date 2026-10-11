@@ -211,9 +211,9 @@ export const AdminDashboardView: React.FC = () => {
     }
 
     const courseIdMap: Record<CourseType, string> = {
-      JEE: 'course-jee-main',
-      JEE_ADVANCED: 'course-jee-advanced',
-      NEET: 'course-neet-ug',
+      JEE: 'course_jee',
+      JEE_ADVANCED: 'course_jee_adv',
+      NEET: 'course_neet',
     };
 
     await addQuestion({
@@ -432,10 +432,10 @@ NEET,Botany,Genetics,Mendel Laws,EASY,MCQ,Phenotypic ratio in monohybrid cross i
             id: `IMP-${Date.now()}-${idx}`,
             courseId:
               courseType === 'NEET'
-                ? 'course-neet-ug'
+                ? 'course_neet'
                 : courseType === 'JEE_ADVANCED'
-                ? 'course-jee-advanced'
-                : 'course-jee-main',
+                ? 'course_jee_adv'
+                : 'course_jee',
             courseType,
             examType,
             subject: item.subject,

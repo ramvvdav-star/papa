@@ -44,34 +44,6 @@ import {
   validateGeneratedTestQuestions,
   buildTestQuestionMappings,
 } from '../data/questionBankEngine';
-import { auth, googleProvider } from '../lib/firebase';
-import { signInWithPopup, signOut as firebaseSignOut, onAuthStateChanged } from 'firebase/auth';
-
-const AUTH_TOKEN_KEY = 'nta_pulse_auth_token';
-
-function readStoredSessionToken(): string | null {
-  try {
-    return sessionStorage.getItem(AUTH_TOKEN_KEY) || localStorage.getItem(AUTH_TOKEN_KEY) || null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredSessionToken(token: string | null, rememberMe = true): void {
-  try {
-    if (!token) {
-      sessionStorage.removeItem(AUTH_TOKEN_KEY);
-      localStorage.removeItem(AUTH_TOKEN_KEY);
-      return;
-    }
-    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
-    if (rememberMe) {
-      localStorage.setItem(AUTH_TOKEN_KEY, token);
-    }
-  } catch {}
-}
-
-let inMemoryExamSessionToken: string | null = readStoredSessionToken();
 
 export type AppView =
   | 'login'
@@ -290,7 +262,6 @@ interface ExamContextType {
     password: string;
     rememberMe?: boolean;
   }) => Promise<{ success: boolean; error?: string; accountStatus?: string }>;
-  loginWithGoogle: (preferredCourse?: CourseType) => Promise<{ success: boolean; error?: string }>;
   completeFirstLoginPassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
   requestPasswordRecovery: (params: {
     role: UserRole;
@@ -509,8 +480,17 @@ const INITIAL_REPORTS: QuestionReport[] = [
 const ExamContext = createContext<ExamContextType | undefined>(undefined);
 
 export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Authentication & Session State (in-memory token + Firebase Auth listener)
-  const [sessionToken, setSessionToken] = useState<string | null>(inMemoryExamSessionToken);
+  // Authentication & Session State
+  const [sessionToken, setSessionToken] = useState<string | null>(() => {
+    try {
+      return (
+        localStorage.getItem('ntapulse_session_token') ||
+        sessionStorage.getItem('ntapulse_session_token')
+      );
+    } catch {
+      return null;
+    }
+  });
   const [authProfile, setAuthProfile] = useState<AuthProfile | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [accessDeniedMessage, setAccessDeniedMessage] = useState<string | null>(null);
@@ -674,7 +654,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (!sessionToken) return;
     const headers = { Authorization: `Bearer ${sessionToken}` };
     try {
-      const [batchesRes, annRes, assignRes, attRes, coursesRes, enrRes, matRes] = await Promise.all([
+      const [batchesRes, annRes, assignRes, attRes, coursesRes, enrRes, matRes, bmRes, repRes, sessRes] = await Promise.all([
         fetch('/api/auth/batches', { headers }),
         fetch('/api/auth/announcements', { headers }),
         fetch('/api/auth/test-assignments', { headers }),
@@ -682,6 +662,9 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         fetch('/api/courses', { headers }),
         fetch('/api/enrollments', { headers }),
         fetch('/api/study-materials', { headers }),
+        fetch('/api/bookmarks', { headers }),
+        fetch('/api/reports', { headers }),
+        fetch('/api/exam-session', { headers }),
       ]);
 
       if (batchesRes.ok) setBatches(await batchesRes.json());
@@ -690,6 +673,20 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       if (coursesRes.ok) setCourses(await coursesRes.json());
       if (enrRes.ok) setEnrollments(await enrRes.json());
       if (matRes.ok) setStudyMaterials(await matRes.json());
+      if (bmRes.ok) {
+        const dbBookmarks = await bmRes.json();
+        if (Array.isArray(dbBookmarks)) setBookmarks(dbBookmarks);
+      }
+      if (repRes.ok) {
+        const dbReports = await repRes.json();
+        if (Array.isArray(dbReports) && dbReports.length > 0) setReports(dbReports);
+      }
+      if (sessRes.ok) {
+        const sessPayload = await sessRes.json();
+        if (sessPayload?.session && sessPayload.session.testId && sessPayload.session.timerSecondsLeft > 0) {
+          setInProgressSession((prev) => prev || sessPayload.session);
+        }
+      }
       if (attRes.ok) {
         const allAtt: TestAttemptResult[] = await attRes.json();
         setAllAttempts(allAtt);
@@ -735,34 +732,93 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, [sessionToken, authProfile]);
 
-  // Verify active session token or Firebase Auth state on mount
+  // Verify stored session token on initial mount
   useEffect(() => {
     let mounted = true;
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (!mounted) return;
-      if (firebaseUser) {
-        try {
-          const idToken = await firebaseUser.getIdToken();
-          const res = await fetch('/api/auth/google', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
-            body: JSON.stringify({
-              idToken,
-              displayName: firebaseUser.displayName,
-            }),
-          });
-          if (res.ok && mounted) {
-            const data = await res.json();
-            const profile: AuthProfile = data.profile;
-            const activeToken: string = data.token || idToken;
-            inMemoryExamSessionToken = activeToken;
-            writeStoredSessionToken(activeToken, true);
-            setSessionToken(activeToken);
-            setAuthProfile(profile);
+    async function verifyBootSession() {
+      const initialPath = window.location.pathname;
+      const searchParams = new URLSearchParams(window.location.search);
+      const queryRedirect = searchParams.get('redirect');
+      const desiredPath =
+        queryRedirect || (initialPath !== '/' && initialPath !== '/login' ? initialPath : null);
+
+      if (!sessionToken) {
+        if (mounted) {
+          setAuthProfile(null);
+          setIsAuthLoading(false);
+          setCurrentViewInternal('login');
+          try {
+            if (desiredPath) {
+              setRedirectTarget(desiredPath);
+              window.history.replaceState(
+                {},
+                '',
+                `/login?redirect=${encodeURIComponent(desiredPath)}`
+              );
+            } else if (window.location.pathname !== '/login') {
+              window.history.replaceState({}, '', '/login');
+            }
+          } catch {}
+        }
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/session', {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+        });
+        if (!res.ok) {
+          localStorage.removeItem('ntapulse_session_token');
+          sessionStorage.removeItem('ntapulse_session_token');
+          if (mounted) {
+            setSessionToken(null);
+            setAuthProfile(null);
             setIsAuthLoading(false);
+            setCurrentViewInternal('login');
+            try {
+              window.history.replaceState({}, '', '/login');
+            } catch {}
+          }
+          return;
+        }
+
+        const data = await res.json();
+        const profile: AuthProfile = data.profile;
+        if (mounted) {
+          setAuthProfile(profile);
+          setIsAuthLoading(false);
+
+          if (profile.mustChangePassword) {
+            setCurrentViewInternal('first-login-reset');
+            try {
+              window.history.replaceState({}, '', '/student/first-login');
+            } catch {}
+            return;
+          }
+
+          if (desiredPath) {
+            const courseViolation = checkCoursePathViolation(desiredPath, profile);
+            if (courseViolation) {
+              setAccessDeniedMessage(courseViolation);
+              setCurrentViewInternal('access-denied');
+              return;
+            }
+            const mapped = pathToView(desiredPath);
+            if (mapped.startsWith('admin') && profile.role !== 'ADMIN') {
+              setAccessDeniedMessage('Access Denied — Administrator privileges required.');
+              setCurrentViewInternal('access-denied');
+              return;
+            }
+            if (mapped === 'teacher-dashboard' && profile.role === 'STUDENT') {
+              setAccessDeniedMessage('Access Denied — Faculty / Teacher privileges required.');
+              setCurrentViewInternal('access-denied');
+              return;
+            }
+            setCurrentViewInternal(mapped);
+            try {
+              window.history.replaceState({}, '', viewToPath(mapped, profile));
+            } catch {}
+          } else {
             const defaultView: AppView =
               profile.role === 'ADMIN'
                 ? 'admin-dashboard'
@@ -770,52 +826,22 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 ? 'teacher-dashboard'
                 : 'student-dashboard';
             setCurrentViewInternal(defaultView);
-            return;
+            try {
+              window.history.replaceState({}, '', viewToPath(defaultView, profile));
+            } catch {}
           }
-        } catch {}
+        }
+      } catch {
+        if (mounted) {
+          setIsAuthLoading(false);
+          setCurrentViewInternal('login');
+        }
       }
+    }
 
-      const candidateToken = inMemoryExamSessionToken || readStoredSessionToken();
-      if (candidateToken) {
-        try {
-          const sessionRes = await fetch('/api/auth/session', {
-            headers: { Authorization: `Bearer ${candidateToken}` },
-          });
-          if (sessionRes.ok && mounted) {
-            const sessionData = await sessionRes.json();
-            if (sessionData.valid && sessionData.profile) {
-              const profile: AuthProfile = sessionData.profile;
-              inMemoryExamSessionToken = candidateToken;
-              setSessionToken(candidateToken);
-              setAuthProfile(profile);
-              setIsAuthLoading(false);
-              if (profile.mustChangePassword) {
-                setCurrentViewInternal('first-login-reset');
-                return;
-              }
-              const defaultView: AppView =
-                profile.role === 'ADMIN'
-                  ? 'admin-dashboard'
-                  : profile.role === 'TEACHER'
-                  ? 'teacher-dashboard'
-                  : 'student-dashboard';
-              setCurrentViewInternal(defaultView);
-              return;
-            }
-          }
-        } catch {}
-      }
-
-      inMemoryExamSessionToken = null;
-      writeStoredSessionToken(null);
-      setAuthProfile(null);
-      setIsAuthLoading(false);
-      setCurrentViewInternal('login');
-    });
-
+    verifyBootSession();
     return () => {
       mounted = false;
-      unsubscribe();
     };
   }, []);
 
@@ -850,8 +876,15 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const token: string = data.token;
       const profile: AuthProfile = data.profile;
 
-      inMemoryExamSessionToken = token;
-      writeStoredSessionToken(token, Boolean(params.rememberMe ?? true));
+      try {
+        if (params.rememberMe) {
+          localStorage.setItem('ntapulse_session_token', token);
+        } else {
+          sessionStorage.setItem('ntapulse_session_token', token);
+          localStorage.setItem('ntapulse_session_token', token);
+        }
+      } catch {}
+
       setSessionToken(token);
       setAuthProfile(profile);
       setAccessDeniedMessage(null);
@@ -919,52 +952,6 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  // Login with Google (Firebase Auth + PostgreSQL users/profiles synchronization)
-  const loginWithGoogle = async (
-    preferredCourse?: CourseType
-  ): Promise<{ success: boolean; error?: string }> => {
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      const idToken = await cred.user.getIdToken();
-      const res = await fetch('/api/auth/google', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          idToken,
-          displayName: cred.user.displayName,
-          courseType: preferredCourse,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        return { success: false, error: data.error || 'Google authentication failed.' };
-      }
-      const profile: AuthProfile = data.profile;
-      const activeToken: string = data.token || idToken;
-      inMemoryExamSessionToken = activeToken;
-      writeStoredSessionToken(activeToken, true);
-      setSessionToken(activeToken);
-      setAuthProfile(profile);
-      setAccessDeniedMessage(null);
-      const nextView: AppView =
-        profile.role === 'ADMIN'
-          ? 'admin-dashboard'
-          : profile.role === 'TEACHER'
-          ? 'teacher-dashboard'
-          : 'student-dashboard';
-      setCurrentViewInternal(nextView);
-      try {
-        window.history.pushState({}, '', viewToPath(nextView, profile));
-      } catch {}
-      return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err?.message || 'Google Sign-In failed.' };
-    }
-  };
-
   // Complete First Login Password Creation
   const completeFirstLoginPassword = async (
     newPassword: string
@@ -1024,9 +1011,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         });
       } catch {}
     }
-    await firebaseSignOut(auth).catch(() => {});
-    inMemoryExamSessionToken = null;
-    writeStoredSessionToken(null);
+    try {
+      localStorage.removeItem('ntapulse_session_token');
+      sessionStorage.removeItem('ntapulse_session_token');
+    } catch {}
     setSessionToken(null);
     setAuthProfile(null);
     setAccessDeniedMessage(null);
@@ -1580,21 +1568,61 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     };
   }, [logIntegrityEvent]);
 
-  // Results & History (loaded from PostgreSQL /api/attempts)
+  // Results & History
   const [currentAttemptResult, setCurrentAttemptResult] = useState<TestAttemptResult | null>(null);
-  const [attemptHistory, setAttemptHistory] = useState<TestAttemptResult[]>([]);
+  const [attemptHistory, setAttemptHistory] = useState<TestAttemptResult[]>(() => {
+    try {
+      const saved = localStorage.getItem('ntapulse_attempt_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
-  // Bookmarks (loaded and saved via PostgreSQL /api/bookmarks)
-  const [bookmarks, setBookmarks] = useState<QuestionBookmark[]>([]);
+  // Bookmarks
+  const [bookmarks, setBookmarks] = useState<QuestionBookmark[]>(() => {
+    try {
+      const saved = localStorage.getItem('ntapulse_bookmarks');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
-  // Reports (loaded and saved via PostgreSQL /api/question-reports)
-  const [reports, setReports] = useState<QuestionReport[]>(INITIAL_REPORTS);
+  useEffect(() => {
+    try {
+      localStorage.setItem('ntapulse_bookmarks', JSON.stringify(bookmarks));
+    } catch {}
+  }, [bookmarks]);
+
+  // Reports
+  const [reports, setReports] = useState<QuestionReport[]>(() => {
+    try {
+      const saved = localStorage.getItem('ntapulse_reports');
+      return saved ? JSON.parse(saved) : INITIAL_REPORTS;
+    } catch {
+      return INITIAL_REPORTS;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ntapulse_reports', JSON.stringify(reports));
+    } catch {}
+  }, [reports]);
 
   // Audit Logs
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(INITIAL_AUDIT_LOGS);
 
   // System Settings
-  const [systemSettings, setSystemSettings] = useState<SystemSettings>(defaultSettings);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings>(() => {
+    try {
+      const saved = localStorage.getItem('ntapulse_settings');
+      return saved ? JSON.parse(saved) : defaultSettings;
+    } catch {
+      return defaultSettings;
+    }
+  });
 
   const logAdminAction = (action: string, target: string, details?: string) => {
     const entry: AuditLog = {
@@ -1609,23 +1637,27 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const updateSystemSettings = (newSettings: Partial<SystemSettings>) => {
-    setSystemSettings((prev) => ({ ...prev, ...newSettings }));
+    setSystemSettings((prev) => {
+      const updated = { ...prev, ...newSettings };
+      try {
+        localStorage.setItem('ntapulse_settings', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
     logAdminAction('UPDATE_SETTINGS', 'System Configuration', JSON.stringify(newSettings));
   };
 
-  // Active Session Persistence (backed by PostgreSQL /api/active-session)
+  // Active Session Persistence
   const [inProgressSession, setInProgressSession] = useState<ActiveExamSession | null>(null);
 
   useEffect(() => {
-    if (!authProfile || !sessionToken) return;
-    const headers = { Authorization: `Bearer ${sessionToken}` };
-
-    // Load active exam session from PostgreSQL
-    fetch(`/api/active-session?userId=${encodeURIComponent(authProfile.id)}`, { headers })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((parsed: ActiveExamSession | null) => {
+    try {
+      const saved = localStorage.getItem('ntapulse_active_session');
+      if (saved) {
+        const parsed: ActiveExamSession = JSON.parse(saved);
         if (parsed && parsed.testId && parsed.timerSecondsLeft > 0) {
           setInProgressSession(parsed);
+          // Requirement 10: If user refreshes directly on /exam/live, load the exact saved snapshot without regenerating
           if (window.location.pathname.toLowerCase().startsWith('/exam/live') && parsed.testSnapshot) {
             setActiveTest(parsed.testSnapshot);
             setResponses(parsed.responses || {});
@@ -1638,82 +1670,41 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             setHasAutoSubmitted(false);
           }
         }
-      })
-      .catch(() => {});
-
-    // Load user bookmarks from PostgreSQL
-    fetch(`/api/bookmarks?userId=${encodeURIComponent(authProfile.id)}`, { headers })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data && Array.isArray(data.bookmarkedQuestionIds)) {
-          const loaded: QuestionBookmark[] = data.bookmarkedQuestionIds.map((qId: string) => ({
-            id: `bm_${authProfile.id}_${qId}`,
-            questionId: qId,
-            collection: 'General Revision',
-            note: data.questionNotes?.[qId] || '',
-            createdAt: new Date().toISOString(),
-            question: questions.find((q) => q.id === qId || q.questionId === qId),
-          }));
-          setBookmarks(loaded);
-        }
-      })
-      .catch(() => {});
-
-    // Load question reports from PostgreSQL
-    fetch('/api/question-reports', { headers })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setReports(
-            data.map((r: any) => ({
-              id: r.id,
-              questionId: r.questionId,
-              testId: r.testId,
-              studentName: r.userName || 'Student',
-              reason: r.reason || 'OTHER',
-              description: r.comment || '',
-              status: r.status === 'RESOLVED' ? 'RESOLVED' : 'PENDING',
-              createdAt: r.createdAt || new Date().toISOString(),
-            }))
-          );
-        }
-      })
-      .catch(() => {});
-  }, [authProfile, sessionToken]);
+      }
+    } catch {}
+  }, []);
 
   useEffect(() => {
-    if (!isExamRunning || !activeTest || !authProfile) return;
+    if (!isExamRunning || !activeTest) return;
 
-    const sessionData: ActiveExamSession = {
-      testId: activeTest.id,
-      attemptSetLabel: activeTest.activeAttemptSet,
-      snapshotQuestionIds: activeTest.snapshotQuestionIds,
-      testQuestions: activeTest.testQuestions,
-      testSnapshot: activeTest,
-      responses,
-      timerSecondsLeft,
-      examStartTime,
-      currentQuestionIdx,
-      examMode,
-      integrityEvents,
-      lastSavedTimestamp: Date.now(),
-    };
-
-    const timer = setTimeout(() => {
-      fetch('/api/active-session', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-        },
-        body: JSON.stringify({
-          userId: authProfile.id,
-          session: sessionData,
-        }),
-      }).catch(() => {});
-    }, 1500);
-
-    return () => clearTimeout(timer);
+    try {
+      const sessionData: ActiveExamSession = {
+        testId: activeTest.id,
+        attemptSetLabel: activeTest.activeAttemptSet,
+        snapshotQuestionIds: activeTest.snapshotQuestionIds,
+        testQuestions: activeTest.testQuestions,
+        testSnapshot: activeTest,
+        responses,
+        timerSecondsLeft,
+        examStartTime,
+        currentQuestionIdx,
+        examMode,
+        integrityEvents,
+        lastSavedTimestamp: Date.now(),
+      };
+      localStorage.setItem('ntapulse_active_session', JSON.stringify(sessionData));
+      // Sync active session to PostgreSQL every 10 seconds or when responses change
+      if (sessionToken && timerSecondsLeft % 10 === 0) {
+        fetch('/api/exam-session', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({ session: sessionData }),
+        }).catch(() => {});
+      }
+    } catch {}
   }, [
     isExamRunning,
     activeTest,
@@ -1723,7 +1714,6 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     examMode,
     integrityEvents,
     examStartTime,
-    authProfile,
     sessionToken,
   ]);
 
@@ -1742,19 +1732,19 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const loadTests = useCallback(async () => {
     if (!sessionToken) return;
     try {
-      const res = await fetch('/api/tests?customOnly=true', {
+      const res = await fetch('/api/tests', {
         headers: { Authorization: `Bearer ${sessionToken}` },
       });
       if (res.ok) {
-        const customTests: TestDefinition[] = await res.json();
+        const dbTests: TestDefinition[] = await res.json();
         const allowedSeed = SEED_TESTS.filter((t) =>
           authProfile
             ? isCourseMatchForUser(authProfile, t.courseType || t.courseId || t.examType)
             : true
         );
-        if (Array.isArray(customTests) && customTests.length > 0) {
-          const customIds = new Set(customTests.map((t) => t.id));
-          setTests([...customTests, ...allowedSeed.filter((t) => !customIds.has(t.id))]);
+        if (Array.isArray(dbTests) && dbTests.length > 0) {
+          const dbIds = new Set(dbTests.map((t) => t.id));
+          setTests([...dbTests, ...allowedSeed.filter((t) => !dbIds.has(t.id))]);
         } else {
           setTests(allowedSeed);
         }
@@ -2211,10 +2201,13 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const discardExamSession = () => {
     setInProgressSession(null);
-    if (authProfile) {
-      fetch(`/api/active-session?userId=${encodeURIComponent(authProfile.id)}`, {
+    try {
+      localStorage.removeItem('ntapulse_active_session');
+    } catch {}
+    if (sessionToken) {
+      fetch('/api/exam-session', {
         method: 'DELETE',
-        headers: sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {},
+        headers: { Authorization: `Bearer ${sessionToken}` },
       }).catch(() => {});
     }
   };
@@ -2395,6 +2388,10 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (!activeTest) return null;
     setIsExamRunning(false);
 
+    try {
+      localStorage.removeItem('ntapulse_active_session');
+    } catch {}
+
     const timeTakenSeconds = Math.max(1, Math.round((Date.now() - examStartTime) / 1000));
     const uid = authProfile?.id || currentUser.id;
     const uname = authProfile?.fullName || currentUser.name;
@@ -2421,8 +2418,14 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         const attemptResult: TestAttemptResult = await res.json();
         setCurrentAttemptResult(attemptResult);
         setAllAttempts((prev) => [attemptResult, ...prev]);
-        setAttemptHistory((prev) => [attemptResult, ...prev]);
-        setInProgressSession(null);
+        setAttemptHistory((prev) => {
+          const updated = [attemptResult, ...prev];
+          try {
+            localStorage.setItem('ntapulse_attempt_history', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+
         setCurrentView('result');
         return attemptResult;
       }
@@ -2458,7 +2461,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setCurrentView('result');
   };
 
-  // Bookmarks (persisted in PostgreSQL user_bookmarks)
+  // Bookmarks
   const addBookmark = (
     questionId: string,
     collection: string = 'General Revision',
@@ -2467,56 +2470,40 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const qObj =
       questions.find((q) => q.id === questionId) ||
       activeTest?.questions.find((q) => q.id === questionId);
+    const bmRecord: QuestionBookmark = {
+      id: `bm-${Date.now()}`,
+      questionId,
+      collection,
+      note,
+      createdAt: new Date().toISOString(),
+      question: qObj,
+    };
     setBookmarks((prev) => {
       if (prev.some((b) => b.questionId === questionId)) {
         return prev.map((b) =>
           b.questionId === questionId ? { ...b, collection, note } : b
         );
       }
-      return [
-        {
-          id: `bm-${Date.now()}`,
-          questionId,
-          collection,
-          note,
-          createdAt: new Date().toISOString(),
-          question: qObj,
-        },
-        ...prev,
-      ];
+      return [bmRecord, ...prev];
     });
-
-    if (authProfile) {
-      fetch('/api/bookmarks/toggle', {
+    if (sessionToken) {
+      fetch('/api/bookmarks', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+          Authorization: `Bearer ${sessionToken}`,
         },
-        body: JSON.stringify({
-          userId: authProfile.id,
-          questionId,
-          bookmarked: true,
-          notes: note || '',
-        }),
+        body: JSON.stringify(bmRecord),
       }).catch(() => {});
     }
   };
 
   const removeBookmark = (questionId: string) => {
     setBookmarks((prev) => prev.filter((b) => b.questionId !== questionId));
-    if (authProfile) {
-      fetch('/api/bookmarks/toggle', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-        },
-        body: JSON.stringify({
-          userId: authProfile.id,
-          questionId,
-          bookmarked: false,
-        }),
+    if (sessionToken) {
+      fetch(`/api/bookmarks/${encodeURIComponent(questionId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${sessionToken}` },
       }).catch(() => {});
     }
   };
@@ -2634,31 +2621,30 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       questionSnippet: qObj?.questionText?.slice(0, 80),
     };
     setReports((prev) => [newReport, ...prev]);
-
-    fetch('/api/question-reports', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-      },
-      body: JSON.stringify({
-        id: newReport.id,
-        questionId,
-        testId: testId || 'bank',
-        userId: authProfile?.id || currentUser.id,
-        userName: newReport.studentName,
-        reason,
-        comment: description,
-      }),
-    }).catch(() => {});
+    if (sessionToken) {
+      fetch('/api/reports', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify(newReport),
+      }).catch(() => {});
+    }
   };
 
   const resolveReport = (reportId: string, status: 'RESOLVED' | 'DISMISSED') => {
     setReports((prev) => prev.map((r) => (r.id === reportId ? { ...r, status } : r)));
-    fetch(`/api/question-reports/${reportId}/resolve`, {
-      method: 'PATCH',
-      headers: sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {},
-    }).catch(() => {});
+    if (sessionToken) {
+      fetch(`/api/reports/${encodeURIComponent(reportId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({ status }),
+      }).catch(() => {});
+    }
     logAdminAction('RESOLVE_REPORT', reportId, `Status set to ${status}`);
   };
 
@@ -2685,7 +2671,6 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         clearAccessDenied,
         redirectTarget,
         loginWithCredentials,
-        loginWithGoogle,
         completeFirstLoginPassword,
         requestPasswordRecovery,
 

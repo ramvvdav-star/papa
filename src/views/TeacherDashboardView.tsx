@@ -285,10 +285,10 @@ export const TeacherDashboardView: React.FC = () => {
     await addQuestion({
       courseId:
         qCourse === 'NEET'
-          ? 'course-neet-ug'
+          ? 'course_neet'
           : qCourse === 'JEE_ADVANCED'
-          ? 'course-jee-advanced'
-          : 'course-jee-main',
+          ? 'course_jee_adv'
+          : 'course_jee',
       courseType: qCourse,
       examType,
       subject: qSubject,
@@ -303,7 +303,7 @@ export const TeacherDashboardView: React.FC = () => {
       positiveMarks: 4,
       negativeMarks: qType === 'NUMERICAL' ? 0 : 1,
       source: 'ADMIN',
-      status: 'APPROVED',
+      status: 'PUBLISHED',
     });
 
     setQText('');
@@ -321,8 +321,8 @@ export const TeacherDashboardView: React.FC = () => {
       chapter: smChapter,
       title: smTitle.trim(),
       description: `${smCourse} ${smSubject} Faculty Notes`,
-      resourceType: 'NOTES',
-      contentSummary: smSummary.trim(),
+      materialType: 'NOTES',
+      contentBody: smSummary.trim(),
     });
     if (created) {
       setSmTitle('');

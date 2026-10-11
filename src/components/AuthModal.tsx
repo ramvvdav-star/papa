@@ -1,27 +1,28 @@
 import React, { useState } from 'react';
 import { useExam } from '../context/ExamContext';
-import { ExamType } from '../types/exam';
-import { 
-  User, 
-  Lock, 
-  Mail, 
-  Target, 
-  Calendar, 
-  CheckCircle2, 
-  X, 
+import {
+  User,
+  Lock,
+  X,
   ArrowRight,
-  ShieldCheck
+  ShieldCheck,
 } from 'lucide-react';
 
-export const AuthModal: React.FC = () => {
-  const { isAuthModalOpen, setIsAuthModalOpen, login, register, currentUser } = useExam();
+type UserRole = 'STUDENT' | 'TEACHER' | 'ADMIN';
 
-  const [mode, setMode] = useState<'signin' | 'signup' | 'forgot'>('signin');
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+
+export const AuthModal: React.FC = () => {
+  const {
+    isAuthModalOpen,
+    setIsAuthModalOpen,
+    loginWithCredentials,
+    requestPasswordRecovery,
+  } = useExam();
+
+  const [mode, setMode] = useState<'signin' | 'forgot'>('signin');
+  const [role, setRole] = useState<UserRole>('STUDENT');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
-  const [targetExam, setTargetExam] = useState<ExamType>('JEE_MAIN');
-  const [targetYear, setTargetYear] = useState<number>(2026);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -33,34 +34,35 @@ export const AuthModal: React.FC = () => {
     setErrorMsg('');
     setSuccessMsg('');
 
-    if (!email || !email.includes('@')) {
-      setErrorMsg('Please enter a valid academic email address.');
+    if (!identifier.trim()) {
+      setErrorMsg('Please enter your Student ID or academic email address.');
       return;
     }
 
     setIsLoading(true);
 
     if (mode === 'signin') {
-      try {
-        await login(email, password);
+      const res = await loginWithCredentials({
+        role,
+        identifier: identifier.trim(),
+        password,
+        rememberMe: true,
+      });
+      if (res.success) {
         setIsAuthModalOpen(false);
-      } catch {
-        setErrorMsg('Sign-in failed. Please verify your credentials.');
+      } else {
+        setErrorMsg(res.error || 'Sign-in failed. Please verify your credentials.');
       }
-    } else if (mode === 'signup') {
-      if (!name.trim()) {
-        setErrorMsg('Please provide your full student name.');
-        setIsLoading(false);
-        return;
+    } else {
+      const res = await requestPasswordRecovery({
+        role,
+        identifier: identifier.trim(),
+      });
+      if (res.success) {
+        setSuccessMsg(res.message);
+      } else {
+        setErrorMsg(res.message);
       }
-      try {
-        await register({ name, email, targetExam, targetYear });
-        setIsAuthModalOpen(false);
-      } catch {
-        setErrorMsg('Registration failed.');
-      }
-    } else if (mode === 'forgot') {
-      setSuccessMsg(`A password reset link has been dispatched to ${email}. Check your inbox.`);
     }
 
     setIsLoading(false);
@@ -68,7 +70,7 @@ export const AuthModal: React.FC = () => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
-      <div 
+      <div
         className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
@@ -83,7 +85,7 @@ export const AuthModal: React.FC = () => {
               <p className="text-xs text-slate-400">Authenticated CBT Practice &amp; Performance Records</p>
             </div>
           </div>
-          <button 
+          <button
             onClick={() => setIsAuthModalOpen(false)}
             className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
           >
@@ -91,26 +93,26 @@ export const AuthModal: React.FC = () => {
           </button>
         </div>
 
-        {/* Tab switch */}
+        {/* Role Selector */}
         <div className="p-1 bg-slate-100 dark:bg-slate-800/60 m-4 rounded-xl flex">
-          <button
-            type="button"
-            onClick={() => { setMode('signin'); setErrorMsg(''); setSuccessMsg(''); }}
-            className={`flex-1 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
-              mode === 'signin' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs' : 'text-slate-500'
-            }`}
-          >
-            Sign In
-          </button>
-          <button
-            type="button"
-            onClick={() => { setMode('signup'); setErrorMsg(''); setSuccessMsg(''); }}
-            className={`flex-1 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
-              mode === 'signup' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs' : 'text-slate-500'
-            }`}
-          >
-            Register Student
-          </button>
+          {(['STUDENT', 'TEACHER', 'ADMIN'] as UserRole[]).map((r) => (
+            <button
+              key={r}
+              type="button"
+              onClick={() => {
+                setRole(r);
+                setErrorMsg('');
+                setSuccessMsg('');
+              }}
+              className={`flex-1 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
+                role === r
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-500'
+              }`}
+            >
+              {r === 'STUDENT' ? 'Student' : r === 'TEACHER' ? 'Faculty' : 'Admin'}
+            </button>
+          ))}
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 pt-2 space-y-4">
@@ -126,36 +128,17 @@ export const AuthModal: React.FC = () => {
             </div>
           )}
 
-          {mode === 'signup' && (
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
-                Student Full Name
-              </label>
-              <div className="relative">
-                <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Aarav Sharma"
-                  required
-                  className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                />
-              </div>
-            </div>
-          )}
-
           <div>
             <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
-              Email Address
+              {role === 'STUDENT' ? 'Student ID or Email' : 'Official Email Address'}
             </label>
             <div className="relative">
-              <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="student@jee2026.edu"
+                type="text"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder={role === 'STUDENT' ? 'STU20260001 or student@ntapulse.in' : 'faculty@ntapulse.in'}
                 required
                 className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
               />
@@ -168,15 +151,13 @@ export const AuthModal: React.FC = () => {
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
                   Password
                 </label>
-                {mode === 'signin' && (
-                  <button
-                    type="button"
-                    onClick={() => setMode('forgot')}
-                    className="text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold hover:underline"
-                  >
-                    Forgot password?
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setMode('forgot')}
+                  className="text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold hover:underline cursor-pointer"
+                >
+                  Forgot password?
+                </button>
               </div>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -192,37 +173,15 @@ export const AuthModal: React.FC = () => {
             </div>
           )}
 
-          {mode === 'signup' && (
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
-                  Target Exam
-                </label>
-                <select
-                  value={targetExam}
-                  onChange={(e) => setTargetExam(e.target.value as ExamType)}
-                  className="w-full py-2.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-slate-100"
-                >
-                  <option value="JEE_MAIN">JEE Main</option>
-                  <option value="JEE_ADVANCED">JEE Advanced</option>
-                  <option value="NEET">NEET UG</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-1">
-                  Target Year
-                </label>
-                <select
-                  value={targetYear}
-                  onChange={(e) => setTargetYear(Number(e.target.value))}
-                  className="w-full py-2.5 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-slate-100"
-                >
-                  <option value={2026}>2026 (Upcoming)</option>
-                  <option value={2027}>2027</option>
-                  <option value={2025}>2025</option>
-                </select>
-              </div>
+          {mode === 'forgot' && (
+            <div className="text-right">
+              <button
+                type="button"
+                onClick={() => setMode('signin')}
+                className="text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold hover:underline cursor-pointer"
+              >
+                Back to Sign In
+              </button>
             </div>
           )}
 
@@ -232,14 +191,18 @@ export const AuthModal: React.FC = () => {
               disabled={isLoading}
               className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs uppercase tracking-wider rounded-xl shadow-md shadow-indigo-200 dark:shadow-none transition-all flex items-center justify-center gap-2 cursor-pointer"
             >
-              {isLoading ? 'Processing...' : mode === 'signin' ? 'Sign In to Portal' : mode === 'signup' ? 'Create Student Account' : 'Send Reset Link'}
+              {isLoading
+                ? 'Processing...'
+                : mode === 'signin'
+                ? 'Sign In to Portal'
+                : 'Submit Recovery Request'}
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
 
           <div className="pt-2 text-center text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-            <span>Encrypted local session · No credentials shared externally</span>
+            <span>Role-verified session · Managed institutional access</span>
           </div>
         </form>
       </div>

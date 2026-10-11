@@ -643,11 +643,19 @@ export const ResultDashboardView: React.FC = () => {
                     </div>
 
                     {/* Options / Answer Review */}
-                    {q.type === 'MCQ' && q.options ? (
+                    {q.type !== 'NUMERICAL' && q.options ? (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
                         {q.options.map((opt) => {
-                          const isCorrectOpt = opt.id === q.correctAnswer;
-                          const isStudentOpt = item.studentAnswer === opt.id;
+                          const correctSet = q.correctAnswer
+                            .split(',')
+                            .map((s) => s.trim().toUpperCase())
+                            .filter(Boolean);
+                          const studentSet = (item.studentAnswer || '')
+                            .split(',')
+                            .map((s) => s.trim().toUpperCase())
+                            .filter(Boolean);
+                          const isCorrectOpt = correctSet.includes(opt.id.toUpperCase());
+                          const isStudentOpt = studentSet.includes(opt.id.toUpperCase());
                           let borderClass = 'border-slate-200 bg-white';
 
                           if (isCorrectOpt) {

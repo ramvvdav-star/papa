@@ -1,10 +1,11 @@
 import express from 'express';
+import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
-import { SEED_TESTS } from './src/data/seedTests.ts';
-import { getCentralizedQuestionBank } from './src/data/fullLengthPapersGenerator.ts';
-import { OFFICIAL_EXAM_BLUEPRINTS } from './src/data/officialExamPatterns.ts';
+import { SEED_TESTS } from './src/data/seedTests';
+import { getCentralizedQuestionBank } from './src/data/fullLengthPapersGenerator';
+import { OFFICIAL_EXAM_BLUEPRINTS } from './src/data/officialExamPatterns';
 import {
   selectQuestionsIntelligent,
   selectQuestionsForBlueprint,
@@ -14,8 +15,8 @@ import {
   createOrResolveAttemptSnapshot,
   auditQuestionBankAndTests,
   normalizeQuestion,
-} from './src/data/questionBankEngine.ts';
-import type {
+} from './src/data/questionBankEngine';
+import {
   Question,
   TestDefinition,
   TestAttemptResult,
@@ -23,29 +24,29 @@ import type {
   ExamType,
   QuestionType,
   Difficulty,
-} from './src/types/exam.ts';
-import { evaluateTestAttempt } from './src/utils/evaluationEngine.ts';
+} from './src/types/exam';
+import { evaluateTestAttempt } from './src/utils/evaluationEngine';
 import {
   ensureDatabaseSeeded,
-  getAllTestsFromDb,
-  saveTestToDb,
-  saveTestSnapshotMappingsToDb,
-  persistQuestionUsageToDb,
-  deleteTestFromDb,
   getQuestionsPaginated,
   createQuestionInDb,
   updateQuestionInDb,
   deleteQuestionFromDb,
+  saveTestToDb,
+  deleteTestFromDb,
+  getTestsFromDb,
   saveAttemptToDb,
   getAttemptsFromDb,
-  getActiveSessionFromDb,
-  saveActiveSessionToDb,
-  deleteActiveSessionFromDb,
-  getUserBookmarksFromDb,
-  toggleUserBookmarkInDb,
+  getActiveExamSessionFromDb,
+  saveActiveExamSessionToDb,
+  deleteActiveExamSessionFromDb,
+  getBookmarksForUserFromDb,
+  upsertBookmarkInDb,
+  deleteBookmarkFromDb,
   getQuestionReportsFromDb,
   createQuestionReportInDb,
-  resolveQuestionReportInDb,
+  updateQuestionReportStatusInDb,
+  getCachedQuestionBank,
 } from './src/db/repository.ts';
 import {
   ensureAuthSeeded,
@@ -89,71 +90,58 @@ import {
   getAuthorizedCourseTypes,
   getAuthorizedSubjectsForUser,
   resolveCourseFromExam,
-  getOrCreateFirebaseProfile,
 } from './src/db/authRepository.ts';
 import {
-  type AuthenticatedRequest,
+  AuthenticatedRequest,
   attachOptionalSessionAuth,
   requireSessionAuth,
   requireRoles,
   validateCourseAccessOrReject,
 } from './src/middleware/auth.ts';
-import { adminAuth } from './src/lib/firebase-admin.ts';
-import { isDatabaseReachable } from './src/db/bootstrapSchema.ts';
-import { isDatabaseConfigured } from './src/db/index.ts';
 
 dotenv.config();
 
 const app = express();
-const port = Number(process.env.PORT) || 3000;
+const port = 3000;
 
 app.use(express.json({ limit: '15mb' }));
 
 // Runtime test definitions and attempts backed by PostgreSQL
 let testsDB: TestDefinition[] = [...SEED_TESTS];
 let attemptsDB: TestAttemptResult[] = [];
-let dbInitPromise: Promise<void> | null = null;
 
-async function ensureServerDataInitialized(): Promise<void> {
-  if (!dbInitPromise) {
-    dbInitPromise = Promise.all([
-      ensureDatabaseSeeded(),
-      ensureAuthSeeded(),
-      getAllTestsFromDb().then((loadedTests) => {
-        if (loadedTests.length > 0) {
-          testsDB = loadedTests;
-        }
-      }),
-      getAttemptsFromDb().then((loaded) => {
-        if (loaded.length > 0) {
-          attemptsDB = loaded;
-        }
-      }),
-    ])
-      .then(() => undefined)
-      .catch((err) => {
-        dbInitPromise = null;
-        console.warn('Database initialization note:', err);
-      });
-  }
-  return dbInitPromise;
-}
-
-app.use('/api', async (_req, _res, next) => {
-  await ensureServerDataInitialized();
-  next();
+// Seed PostgreSQL question bank, RBAC profiles, tests, and load historical attempts
+Promise.all([
+  ensureDatabaseSeeded().then(() => getTestsFromDb()).then((loadedTests) => {
+    if (loadedTests.length > 0) {
+      testsDB = loadedTests;
+    }
+  }),
+  ensureAuthSeeded(),
+  getAttemptsFromDb().then((loaded) => {
+    if (loaded.length > 0) {
+      attemptsDB = loaded;
+    }
+  }),
+]).catch((err) => {
+  console.warn('Database initialization note:', err);
 });
+
+// Helper to strip correct answers & explanations when serving live exam questions to students
+function sanitizeQuestionsForExamMode(questionsList: Question[], shouldStrip: boolean): Question[] {
+  if (!shouldStrip) return questionsList;
+  return questionsList.map((q) => ({
+    ...q,
+    correctAnswer: '',
+    explanation: '',
+  }));
+}
 
 // ----------------- AUTHENTICATION & RBAC API ROUTES -----------------
 
-// Health & Deployment Readiness check
+// Health check
 app.get('/api/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    database: isDatabaseReachable() ? 'postgresql-connected' : 'resilient-serverless-store',
-    configured: isDatabaseConfigured(),
-    time: new Date().toISOString(),
-  });
+  res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
 // POST /api/auth/login
@@ -192,36 +180,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// POST /api/auth/google - Exchange Firebase ID token and synchronize user in PostgreSQL
-app.post('/api/auth/google', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    const token =
-      authHeader && authHeader.startsWith('Bearer ')
-        ? authHeader.slice(7).trim()
-        : req.body.idToken;
-    if (!token) {
-      return res.status(400).json({ error: 'Missing Firebase ID token.' });
-    }
-    const decoded = await adminAuth.verifyIdToken(token);
-    const { profile, sessionToken } = await getOrCreateFirebaseProfile({
-      uid: decoded.uid,
-      email: decoded.email || `${decoded.uid}@firebase.user`,
-      displayName: decoded.name || req.body.displayName,
-      preferredRole: req.body.role,
-      preferredCourse: req.body.courseType,
-    });
-    return res.json({
-      token: sessionToken || token,
-      profile,
-    });
-  } catch (err) {
-    console.error('Firebase Google auth error:', err);
-    return res.status(401).json({ error: 'Invalid or expired Firebase ID token.' });
-  }
-});
-
-// GET /api/auth/session - Verify active session token or Firebase ID token
+// GET /api/auth/session - Verify active session token
 app.get('/api/auth/session', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -229,21 +188,10 @@ app.get('/api/auth/session', async (req, res) => {
   }
   const rawToken = authHeader.slice(7).trim();
   const verification = await verifySessionToken(rawToken);
-  if (verification.valid && verification.profile) {
-    return res.json({ valid: true, profile: verification.profile, token: rawToken });
-  }
-
-  try {
-    const decoded = await adminAuth.verifyIdToken(rawToken);
-    const { profile, sessionToken } = await getOrCreateFirebaseProfile({
-      uid: decoded.uid,
-      email: decoded.email || `${decoded.uid}@firebase.user`,
-      displayName: decoded.name,
-    });
-    return res.json({ valid: true, profile, token: sessionToken });
-  } catch {
+  if (!verification.valid) {
     return res.status(verification.accountStatus ? 403 : 401).json(verification);
   }
+  return res.json({ valid: true, profile: verification.profile });
 });
 
 // POST /api/auth/logout
@@ -870,26 +818,51 @@ app.get('/api/tests/:id', attachOptionalSessionAuth, async (req: AuthenticatedRe
     return;
   }
 
-  res.json(test);
+  const hideAnswers =
+    req.query.hideAnswers === 'true' ||
+    (req.query.mode === 'EXAM' && req.authProfile?.role === 'STUDENT');
+
+  res.json(
+    hideAnswers
+      ? { ...test, questions: sanitizeQuestionsForExamMode(test.questions, true) }
+      : test
+  );
 });
 
 // GET /api/tests/:id/questions - Load saved test_questions snapshot without regenerating (Requirement 10)
-app.get('/api/tests/:id/questions', attachOptionalSessionAuth, (req: AuthenticatedRequest, res) => {
+app.get('/api/tests/:id/questions', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
   const test = testsDB.find((t) => t.id === req.params.id || t.testId === req.params.id);
   if (!test) {
     return res.status(404).json({ error: 'Test snapshot not found' });
   }
+
+  if (
+    req.authProfile &&
+    !validateCourseAccessOrReject(
+      req.authProfile,
+      test.courseType || test.examType,
+      res,
+      `test questions (${test.id})`
+    )
+  ) {
+    return;
+  }
+
   const canonicalTestId = test.testId || test.id;
   const mappings =
     test.testQuestions && test.testQuestions.length > 0
       ? test.testQuestions
       : buildTestQuestionMappings(canonicalTestId, test.questions, 1, test.activeAttemptSet || 'Set A');
 
+  const hideAnswers =
+    req.query.hideAnswers === 'true' ||
+    (req.query.mode === 'EXAM' && req.authProfile?.role === 'STUDENT');
+
   res.json({
     testId: canonicalTestId,
     activeAttemptSet: test.activeAttemptSet || 'Set A',
     testQuestions: mappings,
-    questions: test.questions,
+    questions: sanitizeQuestionsForExamMode(test.questions, hideAnswers),
   });
 });
 
@@ -900,9 +873,22 @@ app.post('/api/tests/:id/attempt-set', attachOptionalSessionAuth, async (req: Au
     return res.status(404).json({ error: 'Test not found' });
   }
   const test = testsDB[idx];
+
+  if (
+    req.authProfile &&
+    !validateCourseAccessOrReject(
+      req.authProfile,
+      test.courseType || test.examType,
+      res,
+      `test attempt set (${test.id})`
+    )
+  ) {
+    return;
+  }
+
   const attemptNumber = Math.max(1, Number(req.body.attemptNumber) || 1);
   const forceSavedSnapshot = Boolean(req.body.forceSavedSnapshot);
-  const bank = getCentralizedQuestionBank();
+  const bank = getCachedQuestionBank();
 
   const resolved = createOrResolveAttemptSnapshot(
     test,
@@ -921,17 +907,19 @@ app.post('/api/tests/:id/attempt-set', attachOptionalSessionAuth, async (req: Au
     activeAttemptSet: resolved.setLabel,
   };
 
-  const canonicalTestId = test.testId || test.id;
-  await saveTestSnapshotMappingsToDb(canonicalTestId, resolved.testQuestions);
-  await persistQuestionUsageToDb(resolved.snapshotQuestionIds, `${canonicalTestId}_att${attemptNumber}`);
+  await saveTestToDb(testsDB[idx]);
+
+  const hideAnswers =
+    req.body.hideAnswers === true ||
+    (req.body.mode === 'EXAM' && req.authProfile?.role === 'STUDENT');
 
   res.json({
-    testId: canonicalTestId,
+    testId: test.testId || test.id,
     attemptNumber,
     setLabel: resolved.setLabel,
     snapshotQuestionIds: resolved.snapshotQuestionIds,
     testQuestions: resolved.testQuestions,
-    questions: resolved.questions,
+    questions: sanitizeQuestionsForExamMode(resolved.questions, hideAnswers),
   });
 });
 
@@ -1211,7 +1199,7 @@ app.post(
         (req.body.id && req.body.id !== 'mock-test' ? req.body.id : generateUniqueTestId('test'));
 
       let testQuestionsList: Question[] = Array.isArray(req.body.questions) ? req.body.questions : [];
-      const bank = getCentralizedQuestionBank();
+      const bank = getCachedQuestionBank();
 
       // If no questions were supplied or duplicates exist, dynamically select unique questions from the bank
       if (testQuestionsList.length === 0) {
@@ -1256,8 +1244,8 @@ app.post(
         testId: uniqueTestId,
         title: req.body.title || 'Course Examination Paper',
         subtitle: req.body.subtitle || 'Controlled Question Bank Paper',
-        courseId: req.body.courseId || resolved.courseId,
-        courseType: req.body.courseType || resolved.courseType,
+        courseId: resolved.courseId,
+        courseType: resolved.courseType,
         examType,
         testType: req.body.testType || 'CUSTOM',
         patternYear: Number(req.body.patternYear) || 2026,
@@ -1467,14 +1455,14 @@ app.post(
       });
 
       res.status(201).json(created);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error creating question:', err);
-      res.status(400).json({ error: err?.message || 'Failed to create question' });
+      res.status(500).json({ error: 'Failed to create question' });
     }
   }
 );
 
-// PATCH /api/questions/:id - Update question in PostgreSQL
+// PATCH /api/questions/:id - Admin / Authorized Teacher only
 app.patch(
   '/api/questions/:id',
   requireRoles(['ADMIN', 'TEACHER']),
@@ -1485,8 +1473,8 @@ app.patch(
         return res.status(404).json({ error: 'Question not found' });
       }
       res.json(updated);
-    } catch (err) {
-      res.status(500).json({ error: 'Failed to update question' });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || 'Failed to update question' });
     }
   }
 );
@@ -1505,89 +1493,165 @@ app.delete(
   }
 );
 
-// ----------------- ACTIVE EXAM SESSION, BOOKMARKS & QUESTION REPORTS (POSTGRESQL) -----------------
+// ----------------- PERSISTENT ACTIVE EXAM SESSION, BOOKMARKS & REPORTS ROUTES -----------------
 
-app.get('/api/active-session', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const userId = req.authProfile?.id || (req.query.userId as string);
-  if (!userId) return res.json(null);
-  const session = await getActiveSessionFromDb(userId);
-  res.json(session);
-});
-
-app.post('/api/active-session', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const userId = req.authProfile?.id || req.body.userId;
-  const session = req.body.session;
-  if (!userId || !session) {
-    return res.status(400).json({ error: 'userId and session are required.' });
+app.get('/api/exam-session', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const session = await getActiveExamSessionFromDb(req.authProfile!.id);
+    res.json({ session });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load active exam session.' });
   }
-  await saveActiveSessionToDb(userId, session);
-  res.json({ saved: true });
 });
 
-app.delete('/api/active-session', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const userId = req.authProfile?.id || (req.query.userId as string);
-  if (userId) {
-    await deleteActiveSessionFromDb(userId);
+app.put('/api/exam-session', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { session } = req.body;
+    if (!session || !session.testId) {
+      return res.status(400).json({ error: 'Invalid exam session payload.' });
+    }
+    await saveActiveExamSessionToDb(
+      req.authProfile!.id,
+      session,
+      req.authProfile!.courseId || 'course_jee'
+    );
+    res.json({ success: true, savedAt: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save active exam session.' });
   }
-  res.json({ deleted: true });
 });
 
-app.get('/api/bookmarks', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const userId = req.authProfile?.id || (req.query.userId as string);
-  if (!userId) return res.json({ bookmarkedQuestionIds: [], questionNotes: {} });
-  const data = await getUserBookmarksFromDb(userId);
-  res.json(data);
-});
-
-app.post('/api/bookmarks/toggle', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const userId = req.authProfile?.id || req.body.userId;
-  const { questionId, bookmarked, notes } = req.body;
-  if (!userId || !questionId) {
-    return res.status(400).json({ error: 'userId and questionId are required.' });
+app.delete('/api/exam-session', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    await deleteActiveExamSessionFromDb(req.authProfile!.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete active exam session.' });
   }
-  await toggleUserBookmarkInDb({
+});
+
+app.get('/api/bookmarks', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const list = await getBookmarksForUserFromDb(req.authProfile!.id);
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load bookmarks.' });
+  }
+});
+
+app.post('/api/bookmarks', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const saved = await upsertBookmarkInDb(
+      req.authProfile!.id,
+      req.body,
+      req.authProfile!.courseId || 'course_jee'
+    );
+    res.status(201).json(saved);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save bookmark.' });
+  }
+});
+
+app.delete('/api/bookmarks/:questionId', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    await deleteBookmarkFromDb(req.authProfile!.id, req.params.questionId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete bookmark.' });
+  }
+});
+
+app.get('/api/reports', requireSessionAuth, async (_req, res) => {
+  try {
+    const list = await getQuestionReportsFromDb();
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load question reports.' });
+  }
+});
+
+app.post('/api/reports', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const actor = req.authProfile!;
+    const created = await createQuestionReportInDb(actor.id, {
+      ...req.body,
+      id: req.body.id || `rep-${Date.now()}`,
+      studentName: actor.fullName || req.body.studentName || 'Student',
+      status: 'PENDING',
+      createdAt: new Date().toISOString(),
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to submit question report.' });
+  }
+});
+
+app.patch(
+  '/api/reports/:id',
+  requireRoles(['ADMIN', 'TEACHER']),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const { status } = req.body;
+      await updateQuestionReportStatusInDb(req.params.id, status || 'RESOLVED');
+      res.json({ success: true, status: status || 'RESOLVED' });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update report status.' });
+    }
+  }
+);
+
+// Helper to hydrate authoritative answer keys & explanations on server before grading
+function hydrateTestQuestionsFromBank(targetTest: TestDefinition): TestDefinition {
+  const bank = getCachedQuestionBank();
+  const bankMap = new Map<string, Question>();
+  bank.forEach((q) => {
+    bankMap.set(q.id, q);
+    if (q.questionId) bankMap.set(q.questionId, q);
+  });
+  const serverTest = testsDB.find((t) => t.id === targetTest.id || t.testId === targetTest.id);
+  if (serverTest && Array.isArray(serverTest.questions)) {
+    serverTest.questions.forEach((q) => {
+      bankMap.set(q.id, q);
+      if (q.questionId) bankMap.set(q.questionId, q);
+    });
+  }
+
+  const hydratedQuestions = (targetTest.questions || []).map((q) => {
+    const fullQ = bankMap.get(q.questionId || q.id);
+    if (fullQ && (!q.correctAnswer || !q.explanation)) {
+      return {
+        ...q,
+        correctAnswer: fullQ.correctAnswer,
+        explanation: fullQ.explanation,
+        tolerance: fullQ.tolerance ?? q.tolerance,
+      };
+    }
+    return q;
+  });
+
+  return {
+    ...targetTest,
+    questions: hydratedQuestions,
+  };
+}
+
+// POST /api/evaluate & POST /api/attempts - Server-side authoritative test evaluation with course verification
+const handleEvaluateAttempt = async (req: AuthenticatedRequest, res: express.Response) => {
+  const {
+    testId,
+    test,
+    testDefinition,
+    responses,
+    timeTakenSeconds,
+    totalTestDurationSeconds,
     userId,
-    questionId,
-    bookmarked: Boolean(bookmarked),
-    notes,
-  });
-  res.json({ success: true });
-});
+    userName,
+    enableNegativeMarking,
+  } = req.body;
+  const rawTest =
+    test || testDefinition || testsDB.find((t) => t.id === testId || t.testId === testId);
 
-app.get('/api/question-reports', attachOptionalSessionAuth, async (_req, res) => {
-  const reports = await getQuestionReportsFromDb();
-  res.json(reports);
-});
-
-app.post('/api/question-reports', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const profile = req.authProfile;
-  const report = await createQuestionReportInDb({
-    id: req.body.id || `rep-${Date.now()}`,
-    questionId: req.body.questionId,
-    testId: req.body.testId || 'bank',
-    userId: profile?.id || req.body.userId || 'usr-student-rahul',
-    userName: profile?.fullName || req.body.userName || req.body.studentName || 'Student',
-    studentName: profile?.fullName || req.body.studentName || req.body.userName || 'Student',
-    reason: req.body.reason || 'OTHER',
-    description: req.body.description || req.body.comment || '',
-    comment: req.body.comment || req.body.description || '',
-    status: 'OPEN',
-    createdAt: new Date().toISOString(),
-  });
-  res.status(201).json(report);
-});
-
-app.patch('/api/question-reports/:id/resolve', requireRoles(['ADMIN', 'TEACHER']), async (req, res) => {
-  await resolveQuestionReportInDb(req.params.id);
-  res.json({ resolved: true, id: req.params.id });
-});
-
-// POST /api/evaluate - Server-side authoritative test evaluation with course verification
-app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
-  const { testId, responses, timeTakenSeconds, userId, userName } = req.body;
-  const targetTest = testsDB.find((t) => t.id === testId) || req.body.testDefinition;
-
-  if (!targetTest) {
+  if (!rawTest) {
     return res.status(404).json({ error: 'Test definition not found for evaluation' });
   }
 
@@ -1596,7 +1660,7 @@ app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRe
     profile &&
     !validateCourseAccessOrReject(
       profile,
-      targetTest.courseType || targetTest.examType,
+      rawTest.courseType || rawTest.examType,
       res,
       'test evaluation'
     )
@@ -1604,15 +1668,16 @@ app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRe
     return;
   }
 
-  const resolvedCourse = resolveCourseFromExam(targetTest.courseType || targetTest.examType);
-  const effectiveUserId = profile?.id || userId || 'usr-student-rahul';
+  const hydratedTest = hydrateTestQuestionsFromBank(rawTest);
+  const resolvedCourse = resolveCourseFromExam(hydratedTest.courseType || hydratedTest.examType);
   const rawResult = evaluateTestAttempt(
-    targetTest,
+    hydratedTest,
     responses || {},
-    (targetTest.durationMinutes || 180) * 60,
+    Number(totalTestDurationSeconds) || (hydratedTest.durationMinutes || 180) * 60,
     Number(timeTakenSeconds) || 0,
-    effectiveUserId,
-    profile?.fullName || userName || 'Rahul Verma'
+    profile?.id || userId || 'usr-student-rahul',
+    profile?.fullName || userName || 'Rahul Verma',
+    { enableNegativeMarking: enableNegativeMarking !== false }
   );
 
   const result: TestAttemptResult = {
@@ -1623,9 +1688,28 @@ app.post('/api/evaluate', attachOptionalSessionAuth, async (req: AuthenticatedRe
 
   attemptsDB.unshift(result);
   await saveAttemptToDb(result);
-  await deleteActiveSessionFromDb(effectiveUserId);
-  res.json(result);
-});
+
+  if (profile) {
+    await deleteActiveExamSessionFromDb(profile.id);
+  }
+
+  // Increment attempt count & avg score on test and persist to PostgreSQL
+  const tIdx = testsDB.findIndex((t) => t.id === hydratedTest.id || t.testId === hydratedTest.id);
+  if (tIdx !== -1) {
+    const existingT = testsDB[tIdx];
+    const prevCount = existingT.attemptsCount || 0;
+    const prevAvg = existingT.avgScore || 0;
+    const newCount = prevCount + 1;
+    const newAvg = Math.round((prevAvg * prevCount + result.totalScore) / newCount);
+    testsDB[tIdx] = { ...existingT, attemptsCount: newCount, avgScore: newAvg };
+    await saveTestToDb(testsDB[tIdx]);
+  }
+
+  return res.status(201).json(result);
+};
+
+app.post('/api/evaluate', attachOptionalSessionAuth, handleEvaluateAttempt);
+app.post('/api/attempts', attachOptionalSessionAuth, handleEvaluateAttempt);
 
 // GET /api/attempts - list attempts (strictly isolated by student ownership & enrolled course)
 app.get('/api/attempts', attachOptionalSessionAuth, (req: AuthenticatedRequest, res) => {
@@ -1633,7 +1717,7 @@ app.get('/api/attempts', attachOptionalSessionAuth, (req: AuthenticatedRequest, 
   const profile = req.authProfile;
 
   if (profile && profile.role === 'STUDENT') {
-    // A student can NEVER read another student's attempts or another course's attempts
+    // A student can NEVER read another student's private attempts or another course's attempts
     if (userId && typeof userId === 'string' && userId !== profile.id) {
       return res.status(403).json({
         error: 'Access Denied — Students can only view their own attempt results.',
@@ -1724,6 +1808,14 @@ app.get('/api/security/rls-audit', requireSessionAuth, async (_req, res) => {
         'announcements',
         'test_attempts',
         'batches',
+        'auth_sessions',
+        'audit_logs',
+        'password_recovery_requests',
+        'platform_settings',
+        'users',
+        'active_exam_sessions',
+        'question_bookmarks',
+        'question_reports',
       ],
       accessMatrix: matrix,
       rlsPoliciesSql: rlsSql,
@@ -1737,7 +1829,6 @@ app.get('/api/security/rls-audit', requireSessionAuth, async (_req, res) => {
 // Setup Vite or Static Serving
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
