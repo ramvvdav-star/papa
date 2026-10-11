@@ -24,7 +24,7 @@ import {
   QuestionType,
   Difficulty,
 } from './src/types/exam';
-import { evaluateTestAttempt } from './src/utils/evaluationEngine';
+import { evaluateTestAttempt } from './src/utils/evaluationEngine.js';
 import { ensureSchemaBootstrapped } from './src/db/bootstrapSchema.ts';
 import {
   ensureDatabaseSeeded,
