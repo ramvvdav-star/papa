@@ -1,32 +1,29 @@
 # NTA PULSE — Supabase + GitHub + Vercel Production Architecture & Deployment Guide
 
-## 1. Why Login Previously Failed on Vercel (And How It Was Fixed)
+## 1. Key Architectural Fixes for Serverless & Persistence
 
-1. **Serverless Cold-Start Bundling (`vite` import & `.ts` extensions)**:
-   - Previously, `server.ts` statically imported `vite` at the top level (`import { createServer as createViteServer } from 'vite'`), and `api/index.ts` used `.ts` file extension imports. In Vercel's production serverless runtime (`@vercel/node`), `vite` is a `devDependency` and only needed in local dev.
-   - **Fix**: `vite` is now dynamically imported only when `process.env.NODE_ENV !== 'production'`, and all server/middleware imports use standard module specifiers.
-2. **Self-Healing Database Schema Bootstrap (`src/db/bootstrapSchema.ts`)**:
-   - Previously, if a newly provisioned PostgreSQL / Supabase database did not yet have all 20 tables (`courses`, `profiles`, `enrollments`, `auth_sessions`, `tests`, `test_attempts`, etc.), queries threw `relation "tests" does not exist` or `Failed query: insert into "courses"`.
-   - **Fix**: `ensureSchemaBootstrapped()` automatically executes idempotent `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements on boot before seeding or querying.
-3. **Stateless + Stateful HMAC Session Tokens Across Serverless Lambdas**:
-   - On Vercel, consecutive API requests (`/api/auth/login` followed by `/api/auth/batches` or `/api/tests`) can be routed to different serverless lambda instances.
-   - **Fix**: Session tokens (`nta_sess.<payload>.<hmac>`) are both stored in PostgreSQL `auth_sessions` AND cryptographically signed with HMAC-SHA256, ensuring sessions remain valid across any serverless instance and persist across browser refreshes.
-4. **Google Sign-In Profile Unpacking**:
-   - Fixed `/api/auth/google` and `/api/auth/session` in `server.ts` to properly destructure `{ profile, sessionToken }` from `getOrCreateFirebaseProfile()`.
+1. **Zero Firebase Dependency**:
+   - All Firebase and Firebase Admin packages, configuration files (`firebase-blueprint.json`, `firestore.rules`), and imports have been completely removed. Authentication is powered by Supabase Auth (`@supabase/supabase-js`) and PostgreSQL-persisted RBAC sessions (`auth_sessions`).
+2. **Serverless Cold-Start Bundling (`vite` dynamic import)**:
+   - `server.ts` dynamically imports `vite` only when `process.env.NODE_ENV !== 'production'`. In Vercel's production serverless runtime (`api/index.ts`), Express handles `/api/*` routes without loading `vite`.
+3. **Self-Healing Database Schema Bootstrap (`src/db/bootstrapSchema.ts`)**:
+   - `ensureSchemaBootstrapped()` executes idempotent `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements before seeding or querying, preventing missing-table errors on fresh databases.
+4. **Non-Recursive Row Level Security (`src/db/rls_policies.sql`)**:
+   - All 18 public tables have PostgreSQL Row Level Security enabled. Helper functions (`app_current_user_role()`, `app_authorized_course_ids()`) use `SECURITY DEFINER` with `SET row_security = off` to prevent infinite recursion (`stack depth limit exceeded`) while enforcing strict course isolation between `JEE`, `JEE_ADVANCED`, and `NEET`.
 
 ---
 
 ## 2. Supabase Database Setup & SQL Migrations
 
-All version-controlled PostgreSQL migrations are located in `supabase/migrations/`:
+All version-controlled PostgreSQL migrations are located in `supabase/migrations/` and `src/db/`:
 
-- `supabase/migrations/20261010000001_nta_pulse_complete_schema.sql`: Creates all 20 normalized tables (`courses`, `profiles`, `enrollments`, `study_materials`, `auth_sessions`, `batches`, `test_assignments`, `announcements`, `audit_logs`, `password_recovery_requests`, `platform_settings`, `questions`, `question_usage`, `tests`, `test_questions`, `test_attempts`, `active_exam_sessions`, `user_bookmarks`, `question_reports`, `users`) with indexes and constraints.
-- `supabase/migrations/20261010000002_nta_pulse_rls_and_auth_triggers.sql`: Enables Row Level Security (RLS) on all public tables, creates role & course verification functions (`is_admin_user()`, `is_teacher_user()`, `is_course_authorized()`), enforces strict JEE vs. JEE Advanced vs. NEET course isolation, and adds `handle_new_supabase_auth_user()` for automatic student profile provisioning.
+- `supabase/migrations/20260410000000_complete_production_schema.sql`: Creates all 18 production tables and indexes idempotently.
+- `src/db/rls_policies.sql`: Enables Row Level Security (RLS) on all public tables and configures non-recursive course-isolation policies.
 
-### Option A: Automatic Schema Creation (Zero-Config)
-Simply set `DATABASE_URL` (your Supabase Transaction/Session Pooler URI or Direct Connection URI) in your environment variables. On the first API request, `src/db/bootstrapSchema.ts` automatically creates all tables, indexes, and seeds the initial RBAC accounts and official mock tests.
+### Option A: Automatic Schema Creation
+Set `DATABASE_URL` (your Supabase Transaction/Session Pooler URI or Direct Connection URI) in your environment variables. On startup, `src/db/bootstrapSchema.ts` automatically verifies all tables, indexes, and seeds initial courses, demo accounts, and official mock tests without overwriting existing data.
 
-### Option B: Run Explicit Migration & Reconciliation Script
+### Option B: Run Explicit Migration Script
 ```bash
 DATABASE_URL="postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres" npm run db:migrate:supabase
 ```
@@ -45,12 +42,12 @@ DATABASE_URL="postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pool
    - Framework Preset: **Vite**
    - Build Command: `npm run build`
    - Output Directory: `dist`
-   - `vercel.json` automatically routes `/api/(.*)` to the Express serverless handler `/api/index.ts` and SPA routes to `/index.html`.
+   - `vercel.json` routes `/api/(.*)` to `/api/index.ts` and all frontend SPA routes to `/index.html`.
 3. **Environment Variables in Vercel (`Settings -> Environment Variables`)**:
    - `DATABASE_URL`: Your Supabase PostgreSQL connection string (`postgresql://...`)
-   - `SESSION_SECRET`: Any 32+ character random string for signing stateless/stateful session tokens
+   - `SESSION_SECRET`: 32+ character cryptographic random secret
    - `VITE_SUPABASE_URL` & `VITE_SUPABASE_ANON_KEY`: Your Supabase Project URL and Anon Key
    - `SUPABASE_SERVICE_ROLE_KEY`: (Server-only) Your Supabase Service Role Key
-   - `GEMINI_API_KEY`: (Optional) Server-side Gemini API key
-4. **Verify Live Health Endpoint**:
-   - Open `https://<your-vercel-domain>.vercel.app/api/health` to confirm `"status": "ok"`.
+   - `APP_URL`: `https://<your-vercel-domain>.vercel.app`
+4. **Configure Supabase Auth Redirect URLs**:
+   - In your Supabase Dashboard (`Authentication -> URL Configuration`), set **Site URL** to `https://<your-vercel-domain>.vercel.app` and add `https://<your-vercel-domain>.vercel.app/**` under **Redirect URLs**.

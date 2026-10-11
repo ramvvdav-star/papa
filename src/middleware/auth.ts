@@ -1,51 +1,52 @@
 import type { Request, Response, NextFunction } from 'express';
-import type { DecodedIdToken } from 'firebase-admin/auth';
-import { adminAuth } from '../lib/firebase-admin.ts';
+import { supabaseAdmin } from '../lib/supabaseServer.ts';
 import { getOrCreateUser } from '../db/users.ts';
 import {
   verifySessionToken,
-  getOrCreateFirebaseProfile,
+  getOrCreateSupabaseProfile,
   isCourseAuthorizedForUser,
   getAuthorizedCourseTypes,
 } from '../db/authRepository.ts';
 import type { AuthProfile, UserRole } from '../types/auth.ts';
 
 export interface AuthenticatedRequest extends Request {
-  user?: DecodedIdToken;
   authProfile?: AuthProfile;
   rawToken?: string;
 }
 
 async function resolveAuthFromBearer(rawToken: string): Promise<{
   profile?: AuthProfile;
-  decodedUser?: DecodedIdToken;
   accountStatus?: string;
   error?: string;
 }> {
-  // 1. Check institutional session token first
+  // 1. Check PostgreSQL persistent session token first
   const sessionCheck = await verifySessionToken(rawToken);
   if (sessionCheck.valid && sessionCheck.profile) {
     return { profile: sessionCheck.profile };
   }
 
-  // 2. Otherwise verify as a Firebase ID token and synchronize with PostgreSQL users & profiles
-  try {
-    const decodedToken = await adminAuth.verifyIdToken(rawToken);
-    if (decodedToken.uid) {
-      await getOrCreateUser(
-        decodedToken.uid,
-        decodedToken.email || '',
-        decodedToken.name || undefined
-      );
-      const { profile } = await getOrCreateFirebaseProfile({
-        uid: decodedToken.uid,
-        email: decodedToken.email || '',
-        displayName: decodedToken.name || undefined,
-      });
-      return { profile, decodedUser: decodedToken };
+  // 2. Verify as a Supabase Auth JWT token if Supabase server client is configured
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin.auth.getUser(rawToken);
+      if (!error && data?.user) {
+        const sbUser = data.user;
+        await getOrCreateUser(
+          sbUser.id,
+          sbUser.email || '',
+          sbUser.user_metadata?.full_name || sbUser.user_metadata?.name || undefined
+        );
+        const { profile } = await getOrCreateSupabaseProfile({
+          uid: sbUser.id,
+          email: sbUser.email || '',
+          displayName:
+            sbUser.user_metadata?.full_name || sbUser.user_metadata?.name || undefined,
+        });
+        return { profile };
+      }
+    } catch {
+      // Fall back to sessionCheck error
     }
-  } catch {
-    // Fall back to sessionCheck error
   }
 
   return {
@@ -66,7 +67,6 @@ export const attachOptionalSessionAuth = async (
       const resolved = await resolveAuthFromBearer(rawToken);
       if (resolved.profile) {
         req.authProfile = resolved.profile;
-        req.user = resolved.decodedUser;
         req.rawToken = rawToken;
       }
     } catch {
@@ -98,50 +98,27 @@ export const requireSessionAuth = async (
   }
 
   const rawToken = authHeader.slice(7).trim();
-  try {
-    const resolved = await resolveAuthFromBearer(rawToken);
-    if (!resolved.profile) {
-      return res.status(resolved.accountStatus ? 403 : 401).json({
-        error: resolved.error || 'Session invalid or expired.',
-        accountStatus: resolved.accountStatus,
-        code: 'INVALID_SESSION',
-      });
-    }
+  const verification = await resolveAuthFromBearer(rawToken);
 
-    // Strict Enrollment Status check for Students (Section 1 & Section 24)
-    if (
-      resolved.profile.role === 'STUDENT' &&
-      resolved.profile.enrollmentStatus &&
-      resolved.profile.enrollmentStatus !== 'ACTIVE'
-    ) {
-      return res.status(403).json({
-        error: `Course Enrollment ${resolved.profile.enrollmentStatus} — Your enrollment in ${resolved.profile.courseType} is not active.`,
-        code: 'INACTIVE_ENROLLMENT',
-        enrollmentStatus: resolved.profile.enrollmentStatus,
-      });
-    }
-
-    req.authProfile = resolved.profile;
-    req.user = resolved.decodedUser;
-    req.rawToken = rawToken;
-    next();
-  } catch (err) {
-    console.error('Auth middleware error:', err);
-    return res.status(401).json({ error: 'Failed to verify authentication session.' });
+  if (!verification.profile) {
+    return res.status(verification.accountStatus ? 403 : 401).json({
+      error: verification.error || 'Session invalid or expired.',
+      accountStatus: verification.accountStatus,
+      code: 'SESSION_INVALID',
+    });
   }
+
+  req.authProfile = verification.profile;
+  req.rawToken = rawToken;
+  next();
 };
 
 export const requireRoles = (allowedRoles: UserRole[]) => {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-    await requireSessionAuth(req, res, async () => {
-      const profile = req.authProfile;
-      if (!profile || !allowedRoles.includes(profile.role)) {
-        const requiredText =
-          allowedRoles.includes('ADMIN') && allowedRoles.length === 1
-            ? 'Access Denied — Administrator privileges required.'
-            : `Access Denied — Requires ${allowedRoles.join(' or ')} privileges.`;
+    await requireSessionAuth(req, res, () => {
+      if (!req.authProfile || !allowedRoles.includes(req.authProfile.role)) {
         return res.status(403).json({
-          error: requiredText,
+          error: `Access Denied — This endpoint requires ${allowedRoles.join(' or ')} authorization.`,
           code: 'FORBIDDEN_ROLE',
         });
       }
@@ -150,25 +127,44 @@ export const requireRoles = (allowedRoles: UserRole[]) => {
   };
 };
 
-export const validateCourseAccessOrReject = (
+/**
+ * Validates that the authenticated user is enrolled in or assigned to the target course/exam.
+ * Rejects unauthorized cross-course access with HTTP 403.
+ */
+export function validateCourseAccessOrReject(
   profile: AuthProfile | undefined,
-  requestedCourseOrExam: string | undefined | null,
+  targetCourseOrExam: string | undefined | null,
   res: Response,
-  resourceLabel: string = 'resource'
-): boolean => {
-  if (!profile) return true;
-  if (profile.role === 'ADMIN') return true;
-  if (!requestedCourseOrExam || requestedCourseOrExam === 'ALL') return true;
-
-  if (!isCourseAuthorizedForUser(profile, requestedCourseOrExam)) {
-    const allowed = getAuthorizedCourseTypes(profile).join(', ');
-    res.status(403).json({
-      error: `Course Access Denied — Your account is enrolled in [${allowed}] and is not authorized to access ${requestedCourseOrExam} ${resourceLabel}.`,
-      code: 'COURSE_ACCESS_DENIED',
-      enrolledCourses: getAuthorizedCourseTypes(profile),
-      requestedCourse: requestedCourseOrExam,
+  resourceLabel = 'resource'
+): boolean {
+  if (!profile) {
+    res.status(401).json({
+      error: 'Authentication required.',
+      code: 'UNAUTHENTICATED',
     });
     return false;
   }
+
+  if (profile.role === 'ADMIN') {
+    return true;
+  }
+
+  if (profile.role === 'STUDENT' && profile.enrollmentStatus !== 'ACTIVE') {
+    res.status(403).json({
+      error: `Course Access Denied — Your ${profile.courseType} enrollment is currently ${profile.enrollmentStatus}.`,
+      code: 'ENROLLMENT_INACTIVE',
+    });
+    return false;
+  }
+
+  if (!isCourseAuthorizedForUser(profile, targetCourseOrExam)) {
+    const allowed = getAuthorizedCourseTypes(profile).join(', ');
+    res.status(403).json({
+      error: `Course Security Violation — Your account is enrolled in [${allowed}] and is not authorized to access ${targetCourseOrExam} ${resourceLabel}.`,
+      code: 'COURSE_ISOLATION_VIOLATION',
+    });
+    return false;
+  }
+
   return true;
-};
+}

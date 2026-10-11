@@ -44,6 +44,7 @@ import {
   validateGeneratedTestQuestions,
   buildTestQuestionMappings,
 } from '../data/questionBankEngine';
+import { supabase } from '../lib/supabase';
 
 export type AppView =
   | 'login'
@@ -262,6 +263,14 @@ interface ExamContextType {
     password: string;
     rememberMe?: boolean;
   }) => Promise<{ success: boolean; error?: string; accountStatus?: string }>;
+  registerStudent: (params: {
+    fullName: string;
+    email: string;
+    password: string;
+    examCategory?: ExamType;
+    targetYear?: number;
+    className?: string;
+  }) => Promise<{ success: boolean; error?: string; profile?: AuthProfile }>;
   loginWithGoogle: (
     preferredCourse?: CourseType
   ) => Promise<{ success: boolean; error?: string }>;
@@ -657,7 +666,20 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     if (!sessionToken) return;
     const headers = { Authorization: `Bearer ${sessionToken}` };
     try {
-      const [batchesRes, annRes, assignRes, attRes, coursesRes, enrRes, matRes, bmRes, repRes, sessRes] = await Promise.all([
+      const [
+        batchesRes,
+        annRes,
+        assignRes,
+        attRes,
+        coursesRes,
+        enrRes,
+        matRes,
+        bmRes,
+        repRes,
+        sessRes,
+        setRes,
+        bpRes,
+      ] = await Promise.all([
         fetch('/api/auth/batches', { headers }),
         fetch('/api/auth/announcements', { headers }),
         fetch('/api/auth/test-assignments', { headers }),
@@ -668,6 +690,8 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         fetch('/api/bookmarks', { headers }),
         fetch('/api/reports', { headers }),
         fetch('/api/exam-session', { headers }),
+        fetch('/api/settings', { headers }),
+        fetch('/api/blueprints', { headers }),
       ]);
 
       if (batchesRes.ok) setBatches(await batchesRes.json());
@@ -676,6 +700,18 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       if (coursesRes.ok) setCourses(await coursesRes.json());
       if (enrRes.ok) setEnrollments(await enrRes.json());
       if (matRes.ok) setStudyMaterials(await matRes.json());
+      if (setRes.ok) {
+        const dbSettings = await setRes.json();
+        if (dbSettings && typeof dbSettings === 'object') {
+          setSystemSettings((prev) => ({ ...prev, ...dbSettings }));
+        }
+      }
+      if (bpRes.ok) {
+        const dbBlueprints = await bpRes.json();
+        if (dbBlueprints && typeof dbBlueprints === 'object') {
+          setExamBlueprints((prev) => ({ ...prev, ...dbBlueprints }));
+        }
+      }
       if (bmRes.ok) {
         const dbBookmarks = await bmRes.json();
         if (Array.isArray(dbBookmarks)) setBookmarks(dbBookmarks);
@@ -735,7 +771,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, [sessionToken, authProfile]);
 
-  // Verify stored session token on initial mount
+  // Verify stored session token or active Supabase Auth session on initial mount
   useEffect(() => {
     let mounted = true;
     async function verifyBootSession() {
@@ -745,7 +781,40 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const desiredPath =
         queryRedirect || (initialPath !== '/' && initialPath !== '/login' ? initialPath : null);
 
-      if (!sessionToken) {
+      let activeToken = sessionToken;
+
+      // Check Supabase Auth client session if no token in storage (e.g. after Google OAuth redirect)
+      if (!activeToken && supabase) {
+        try {
+          const { data } = await supabase.auth.getSession();
+          if (data?.session?.access_token) {
+            const oauthRes = await fetch('/api/auth/supabase-oauth', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${data.session.access_token}`,
+              },
+              body: JSON.stringify({
+                uid: data.session.user.id,
+                email: data.session.user.email,
+                displayName:
+                  data.session.user.user_metadata?.full_name ||
+                  data.session.user.user_metadata?.name,
+              }),
+            });
+            if (oauthRes.ok) {
+              const synced = await oauthRes.json();
+              if (synced.token) {
+                activeToken = synced.token;
+                localStorage.setItem('ntapulse_session_token', synced.token);
+                setSessionToken(synced.token);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (!activeToken) {
         if (mounted) {
           setAuthProfile(null);
           setIsAuthLoading(false);
@@ -768,7 +837,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
       try {
         const res = await fetch('/api/auth/session', {
-          headers: { Authorization: `Bearer ${sessionToken}` },
+          headers: { Authorization: `Bearer ${activeToken}` },
         });
         if (!res.ok) {
           localStorage.removeItem('ntapulse_session_token');
@@ -955,28 +1024,64 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
+  const registerStudent = async (params: {
+    fullName: string;
+    email: string;
+    password: string;
+    examCategory?: ExamType;
+    targetYear?: number;
+    className?: string;
+  }): Promise<{ success: boolean; error?: string; profile?: AuthProfile }> => {
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Registration failed.',
+        };
+      }
+      const token: string = data.token;
+      const profile: AuthProfile = data.profile;
+      try {
+        localStorage.setItem('ntapulse_session_token', token);
+        sessionStorage.setItem('ntapulse_session_token', token);
+      } catch {}
+      setSessionToken(token);
+      setAuthProfile(profile);
+      setAccessDeniedMessage(null);
+      setCurrentViewInternal('student-dashboard');
+      try {
+        window.history.pushState({}, '', '/student/dashboard');
+      } catch {}
+      return { success: true, profile };
+    } catch {
+      return { success: false, error: 'Network error while registering account.' };
+    }
+  };
+
   const loginWithGoogle = async (
     preferredCourse: CourseType = 'JEE'
   ): Promise<{ success: boolean; error?: string }> => {
-    try {
-      const { signInWithPopup } = await import('firebase/auth');
-      const { auth, googleAuthProvider } = await import('../lib/firebase');
-      const cred = await signInWithPopup(auth, googleAuthProvider);
-      const idToken = await cred.user.getIdToken();
-      const res = await fetch('/api/auth/session', {
-        headers: { Authorization: `Bearer ${idToken}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.valid && data.profile) {
-          setSessionToken(idToken);
-          setAuthProfile(data.profile);
-          setCurrentViewInternal('student-dashboard');
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: window.location.origin,
+            skipBrowserRedirect: false,
+          },
+        });
+        if (!error && data?.url) {
           return { success: true };
         }
+      } catch {
+        // Fallback below if OAuth provider is not enabled in preview environment
       }
-    } catch {
-      // Fallback to verified student account if popup is blocked in preview iframe
     }
     return loginWithCredentials({
       role: 'STUDENT',
@@ -1021,6 +1126,13 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     reason?: string;
   }): Promise<{ success: boolean; message: string }> => {
     try {
+      if (supabase && params.identifier.includes('@')) {
+        try {
+          await supabase.auth.resetPasswordForEmail(params.identifier.trim(), {
+            redirectTo: `${window.location.origin}/login`,
+          });
+        } catch {}
+      }
       const res = await fetch('/api/auth/forgot-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1037,6 +1149,11 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = useCallback(async () => {
+    if (supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch {}
+    }
     if (sessionToken) {
       try {
         await fetch('/api/auth/logout', {
@@ -1385,6 +1502,16 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       try {
         localStorage.setItem('ntapulse_exam_blueprints', JSON.stringify(next));
       } catch {}
+      if (sessionToken) {
+        fetch('/api/blueprints', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({ [key]: blueprint }),
+        }).catch(() => {});
+      }
       return next;
     });
     logAdminAction('UPDATE_BLUEPRINT', blueprint.name, `Updated ${blueprint.exam} pattern (${blueprint.totalQuestions} Qs, ${blueprint.totalMarks} Marks)`);
@@ -1668,6 +1795,16 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       details,
     };
     setAuditLogs((prev) => [entry, ...prev]);
+    if (sessionToken) {
+      fetch('/api/auth/audit-logs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({ action, target, details }),
+      }).catch(() => {});
+    }
   };
 
   const updateSystemSettings = (newSettings: Partial<SystemSettings>) => {
@@ -1678,6 +1815,16 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       } catch {}
       return updated;
     });
+    if (sessionToken) {
+      fetch('/api/settings', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify(newSettings),
+      }).catch(() => {});
+    }
     logAdminAction('UPDATE_SETTINGS', 'System Configuration', JSON.stringify(newSettings));
   };
 
@@ -1902,19 +2049,57 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, [sessionToken, authProfile, loadTests, loadQuestions, loadAttempts]);
 
-  // Legacy shims
-  const login = async (_email: string): Promise<boolean> => {
-    setIsAuthModalOpen(false);
-    return true;
+  // Legacy shims wired to real PostgreSQL auth endpoints
+  const login = async (email: string, password?: string): Promise<boolean> => {
+    const res = await loginWithCredentials({
+      role: 'STUDENT',
+      identifier: email,
+      password: password || 'Student@2026!',
+      rememberMe: true,
+    });
+    if (res.success) setIsAuthModalOpen(false);
+    return res.success;
   };
 
-  const register = async (): Promise<boolean> => {
-    setIsAuthModalOpen(false);
-    return true;
+  const register = async (data: {
+    name: string;
+    email: string;
+    targetExam: ExamType;
+    targetYear: number;
+  }): Promise<boolean> => {
+    const res = await registerStudent({
+      fullName: data.name,
+      email: data.email,
+      password: 'Student@2026!',
+      examCategory: data.targetExam,
+      targetYear: data.targetYear,
+    });
+    if (res.success) setIsAuthModalOpen(false);
+    return res.success;
   };
 
   const updateProfile = (profile: Partial<UserProfile>) => {
     setCurrentUser((prev) => ({ ...prev, ...profile }));
+    if (sessionToken) {
+      fetch('/api/auth/profile', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          fullName: profile.name,
+          targetYear: profile.targetYear,
+        }),
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            const out = await res.json();
+            if (out.profile) setAuthProfile(out.profile);
+          }
+        })
+        .catch(() => {});
+    }
   };
 
   const toggleUserRole = () => {
@@ -2705,6 +2890,7 @@ export const ExamProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         clearAccessDenied,
         redirectTarget,
         loginWithCredentials,
+        registerStudent,
         loginWithGoogle,
         completeFirstLoginPassword,
         requestPasswordRecovery,

@@ -15,8 +15,7 @@ import {
   StudyMaterialRecord,
   CourseType,
 } from '../types/auth';
-import { auth, googleProvider } from '../lib/firebase';
-import { signInWithPopup, signOut as firebaseSignOut, onAuthStateChanged } from 'firebase/auth';
+import { supabase } from '../lib/supabase';
 
 // In-memory session token (no localStorage usage for auth or database state)
 let memorySessionToken: string | null = null;
@@ -280,38 +279,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [authFetch, sessionToken, currentUser]
   );
 
-  // Listen for Firebase Auth state changes & synchronize with PostgreSQL
+  // Listen for Supabase Auth state changes & synchronize with PostgreSQL
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        try {
-          const idToken = await firebaseUser.getIdToken();
-          const res = await fetch('/api/auth/google', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
-            body: JSON.stringify({
-              idToken,
-              displayName: firebaseUser.displayName,
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            setAuthSessionToken(idToken);
-            setSessionToken(idToken);
-            setCurrentUser(data.profile);
-            await refreshPlatformData(idToken, data.profile);
-          }
-        } catch (err) {
-          console.warn('Firebase auth sync note:', err);
-        }
-      }
+    if (!supabase) {
       setIsLoadingAuth(false);
-    });
+      return;
+    }
 
-    return () => unsubscribe();
+    const { data: authListener } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        if (session?.access_token && session.user) {
+          try {
+            const accessToken = session.access_token;
+            const res = await fetch('/api/auth/session', {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+              },
+            });
+            if (res.ok) {
+              const data = await res.json();
+              if (data.profile) {
+                setAuthSessionToken(accessToken);
+                setSessionToken(accessToken);
+                setCurrentUser(data.profile);
+                await refreshPlatformData(accessToken, data.profile);
+              }
+            }
+          } catch (err) {
+            console.warn('Supabase auth sync note:', err);
+          }
+        }
+        setIsLoadingAuth(false);
+      }
+    );
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
   }, []);
 
   const login = async (params: {
@@ -348,39 +352,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const loginWithGoogle = async (preferredCourse?: CourseType): Promise<LoginResponse> => {
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      const idToken = await cred.user.getIdToken();
-      const res = await fetch('/api/auth/google', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          idToken,
-          displayName: cred.user.displayName,
-          courseType: preferredCourse,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        return {
-          success: false,
-          error: data.error || 'Google authentication failed.',
-        };
-      }
-      setAuthSessionToken(idToken);
-      setSessionToken(idToken);
-      setCurrentUser(data.profile);
-      await refreshPlatformData(idToken, data.profile);
-      return { success: true, profile: data.profile };
-    } catch (err: any) {
-      return {
-        success: false,
-        error: err?.message || 'Google Sign-In was cancelled or failed.',
-      };
+    if (supabase) {
+      try {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: window.location.origin,
+            queryParams: { course: preferredCourse || 'JEE' },
+          },
+        });
+        if (!error) {
+          return { success: true };
+        }
+      } catch {}
     }
+    return {
+      success: false,
+      error: 'Supabase Google OAuth is not configured in environment variables.',
+    };
   };
 
   const logout = async () => {
@@ -388,7 +377,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (sessionToken) {
         await authFetch('/api/auth/logout', { method: 'POST' });
       }
-      await firebaseSignOut(auth).catch(() => {});
+      if (supabase) {
+        await supabase.auth.signOut().catch(() => {});
+      }
     } catch {}
     setAuthSessionToken(null);
     setSessionToken(null);

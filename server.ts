@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
@@ -26,6 +25,7 @@ import {
   Difficulty,
 } from './src/types/exam';
 import { evaluateTestAttempt } from './src/utils/evaluationEngine';
+import { ensureSchemaBootstrapped } from './src/db/bootstrapSchema.ts';
 import {
   ensureDatabaseSeeded,
   getQuestionsPaginated,
@@ -51,6 +51,11 @@ import {
 import {
   ensureAuthSeeded,
   authenticateUser,
+  registerStudentAccount,
+  getOrCreateSupabaseProfile,
+  updateSelfProfile,
+  getPlatformSetting,
+  setPlatformSetting,
   verifySessionToken,
   revokeSessionByToken,
   revokeAllUserSessions,
@@ -98,6 +103,7 @@ import {
   requireRoles,
   validateCourseAccessOrReject,
 } from './src/middleware/auth.ts';
+import { supabaseAdmin } from './src/lib/supabaseServer.ts';
 
 dotenv.config();
 
@@ -109,23 +115,59 @@ app.use(express.json({ limit: '15mb' }));
 // Runtime test definitions and attempts backed by PostgreSQL
 let testsDB: TestDefinition[] = [...SEED_TESTS];
 let attemptsDB: TestAttemptResult[] = [];
+let serverInitPromise: Promise<void> | null = null;
 
-// Seed PostgreSQL question bank, RBAC profiles, tests, and load historical attempts
-Promise.all([
-  ensureDatabaseSeeded().then(() => getTestsFromDb()).then((loadedTests) => {
-    if (loadedTests.length > 0) {
-      testsDB = loadedTests;
+async function ensureServerInitialized(): Promise<void> {
+  if (!serverInitPromise) {
+    serverInitPromise = (async () => {
+      try {
+        await ensureSchemaBootstrapped();
+        await Promise.all([
+          ensureDatabaseSeeded()
+            .then(() => getTestsFromDb())
+            .then((loadedTests) => {
+              if (loadedTests.length > 0) {
+                testsDB = loadedTests;
+              }
+            }),
+          ensureAuthSeeded(),
+          getAttemptsFromDb().then((loaded) => {
+            if (loaded.length > 0) {
+              attemptsDB = loaded;
+            }
+          }),
+        ]);
+      } catch (err) {
+        console.warn('Database initialization note:', err);
+      }
+    })();
+  }
+  return serverInitPromise;
+}
+
+async function syncTestsFromPostgres(): Promise<TestDefinition[]> {
+  await ensureServerInitialized();
+  try {
+    const dbTests = await getTestsFromDb();
+    if (dbTests.length > 0) {
+      testsDB = dbTests;
     }
-  }),
-  ensureAuthSeeded(),
-  getAttemptsFromDb().then((loaded) => {
-    if (loaded.length > 0) {
-      attemptsDB = loaded;
+  } catch {}
+  return testsDB;
+}
+
+async function syncAttemptsFromPostgres(): Promise<TestAttemptResult[]> {
+  await ensureServerInitialized();
+  try {
+    const dbAttempts = await getAttemptsFromDb();
+    if (dbAttempts.length > 0 || attemptsDB.length === 0) {
+      attemptsDB = dbAttempts;
     }
-  }),
-]).catch((err) => {
-  console.warn('Database initialization note:', err);
-});
+  } catch {}
+  return attemptsDB;
+}
+
+ensureServerInitialized();
 
 // Helper to strip correct answers & explanations when serving live exam questions to students
 function sanitizeQuestionsForExamMode(questionsList: Question[], shouldStrip: boolean): Question[] {
@@ -180,9 +222,117 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// GET /api/auth/session - Verify active session token or Firebase ID token
+// GET /api/auth/session - Verify active session token or Supabase Auth JWT token
 app.get('/api/auth/session', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
   return res.json({ valid: true, profile: req.authProfile });
+});
+
+// POST /api/auth/register - Student self-registration persisted in PostgreSQL + Supabase Auth
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { fullName, email, password, examCategory, targetYear, className } = req.body;
+    if (!fullName || !email || !password) {
+      return res.status(400).json({
+        error: 'Full name, email address, and password are required.',
+      });
+    }
+
+    const result = await registerStudentAccount({
+      fullName,
+      email,
+      password,
+      examCategory: examCategory || 'JEE_MAIN',
+      targetYear: Number(targetYear) || 2026,
+      className: className || 'Class 12',
+    });
+
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    // If Supabase Admin SDK is configured, also sync user to Supabase Auth
+    if (supabaseAdmin) {
+      try {
+        await supabaseAdmin.auth.admin.createUser({
+          email: email.trim().toLowerCase(),
+          password,
+          email_confirm: true,
+          user_metadata: {
+            full_name: fullName.trim(),
+            role: 'STUDENT',
+            student_id: result.profile?.studentId,
+          },
+        });
+      } catch {
+        // Non-fatal if user already exists in Supabase Auth
+      }
+    }
+
+    return res.status(201).json({
+      token: result.token,
+      profile: result.profile,
+    });
+  } catch (err) {
+    console.error('Registration error:', err);
+    return res.status(500).json({ error: 'Registration failed on server.' });
+  }
+});
+
+// POST /api/auth/supabase-oauth - Sync Supabase Auth OAuth / JWT session with PostgreSQL RBAC profile
+app.post('/api/auth/supabase-oauth', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const accessToken =
+      (authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '') ||
+      req.body.accessToken;
+
+    if (accessToken && supabaseAdmin) {
+      const { data, error } = await supabaseAdmin.auth.getUser(accessToken);
+      if (!error && data?.user) {
+        const synced = await getOrCreateSupabaseProfile({
+          uid: data.user.id,
+          email: data.user.email || '',
+          displayName:
+            data.user.user_metadata?.full_name || data.user.user_metadata?.name || undefined,
+          preferredCourse: req.body.preferredCourse || 'JEE',
+        });
+        return res.json(synced);
+      }
+    }
+
+    if (req.body.uid && req.body.email) {
+      const synced = await getOrCreateSupabaseProfile({
+        uid: String(req.body.uid),
+        email: String(req.body.email),
+        displayName: req.body.displayName ? String(req.body.displayName) : undefined,
+        preferredCourse: req.body.preferredCourse || 'JEE',
+      });
+      return res.json(synced);
+    }
+
+    return res.status(401).json({ error: 'Valid Supabase Auth session required.' });
+  } catch (err) {
+    console.error('Supabase OAuth sync error:', err);
+    return res.status(500).json({ error: 'Failed to synchronize Supabase Auth session.' });
+  }
+});
+
+// PATCH /api/auth/profile - Self profile update persisted in PostgreSQL
+app.patch('/api/auth/profile', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const updated = await updateSelfProfile({
+      userId: req.authProfile!.id,
+      fullName: req.body.fullName || req.body.name,
+      targetYear: req.body.targetYear,
+      className: req.body.className,
+    });
+    if (!updated) {
+      return res.status(404).json({ error: 'Profile not found.' });
+    }
+    return res.json({ success: true, profile: updated });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to update profile.' });
+  }
 });
 
 // POST /api/auth/logout
@@ -600,6 +750,84 @@ app.get('/api/auth/audit-logs', requireRoles(['ADMIN']), async (_req, res) => {
   }
 });
 
+app.post('/api/auth/audit-logs', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const actor = req.authProfile!;
+    await createAuditLog({
+      actorId: actor.id,
+      actorName: actor.fullName,
+      actorRole: actor.role,
+      action: String(req.body.action || 'ADMIN_ACTION'),
+      target: String(req.body.target || 'Platform'),
+      details: req.body.details ? String(req.body.details) : undefined,
+    });
+    return res.status(201).json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to record audit log.' });
+  }
+});
+
+// Persistent Platform System Settings & Blueprints in PostgreSQL
+app.get('/api/settings', requireSessionAuth, async (_req, res) => {
+  try {
+    const settings = await getPlatformSetting('system_settings', {
+      defaultNegativeMarking: true,
+      enableLeaderboard: true,
+      maintenanceMode: false,
+      allowRegistration: true,
+      strictIntegrityLogging: true,
+      autoSubmitOnTimeout: true,
+    });
+    return res.json(settings);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load system settings.' });
+  }
+});
+
+app.patch('/api/settings', requireRoles(['ADMIN']), async (req: AuthenticatedRequest, res) => {
+  try {
+    const current = await getPlatformSetting('system_settings', {
+      defaultNegativeMarking: true,
+      enableLeaderboard: true,
+      maintenanceMode: false,
+      allowRegistration: true,
+      strictIntegrityLogging: true,
+      autoSubmitOnTimeout: true,
+    });
+    const updated = await setPlatformSetting('system_settings', { ...current, ...req.body });
+    await createAuditLog({
+      actorId: req.authProfile!.id,
+      actorName: req.authProfile!.fullName,
+      actorRole: req.authProfile!.role,
+      action: 'UPDATE_SYSTEM_SETTINGS',
+      target: 'Platform Configuration',
+      details: JSON.stringify(req.body),
+    });
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to save system settings.' });
+  }
+});
+
+app.get('/api/blueprints', requireSessionAuth, async (_req, res) => {
+  try {
+    const blueprints = await getPlatformSetting('exam_blueprints', OFFICIAL_EXAM_BLUEPRINTS);
+    return res.json(blueprints);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to load exam blueprints.' });
+  }
+});
+
+app.put('/api/blueprints', requireRoles(['ADMIN', 'TEACHER']), async (req: AuthenticatedRequest, res) => {
+  try {
+    const current = await getPlatformSetting('exam_blueprints', OFFICIAL_EXAM_BLUEPRINTS);
+    const updated = await setPlatformSetting('exam_blueprints', { ...current, ...req.body });
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to save exam blueprints.' });
+  }
+});
+
 app.get('/api/auth/student-id-config', requireRoles(['ADMIN', 'TEACHER']), async (_req, res) => {
   try {
     const config = await getStudentIdConfig();
@@ -747,7 +975,8 @@ function getAllowedExamTypesForProfile(profile?: AuthenticatedRequest['authProfi
 }
 
 // GET /api/tests - list published tests (strictly filtered by student's enrolled course)
-app.get('/api/tests', attachOptionalSessionAuth, (req: AuthenticatedRequest, res) => {
+app.get('/api/tests', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  await syncTestsFromPostgres();
   const { examType, testType, customOnly } = req.query;
   const profile = req.authProfile;
 
@@ -784,6 +1013,7 @@ app.get('/api/tests', attachOptionalSessionAuth, (req: AuthenticatedRequest, res
 
 // GET /api/tests/:id - get single test (enforces course authorization!)
 app.get('/api/tests/:id', attachOptionalSessionAuth, async (req: AuthenticatedRequest, res) => {
+  await syncTestsFromPostgres();
   const test = testsDB.find((t) => t.id === req.params.id);
   if (!test) {
     return res.status(404).json({ error: 'Test not found' });
@@ -1699,11 +1929,12 @@ const handleEvaluateAttempt = async (req: AuthenticatedRequest, res: express.Res
   return res.status(201).json(result);
 };
 
-app.post('/api/evaluate', attachOptionalSessionAuth, handleEvaluateAttempt);
-app.post('/api/attempts', attachOptionalSessionAuth, handleEvaluateAttempt);
+app.post('/api/evaluate', requireSessionAuth, handleEvaluateAttempt);
+app.post('/api/attempts', requireSessionAuth, handleEvaluateAttempt);
 
 // GET /api/attempts - list attempts (strictly isolated by student ownership & enrolled course)
-app.get('/api/attempts', attachOptionalSessionAuth, (req: AuthenticatedRequest, res) => {
+app.get('/api/attempts', requireSessionAuth, async (req: AuthenticatedRequest, res) => {
+  await syncAttemptsFromPostgres();
   const { userId } = req.query;
   const profile = req.authProfile;
 
@@ -1820,6 +2051,7 @@ app.get('/api/security/rls-audit', requireSessionAuth, async (_req, res) => {
 // Setup Vite or Static Serving
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1843,4 +2075,5 @@ if (!process.env.VERCEL) {
 }
 
 export default app;
+
 

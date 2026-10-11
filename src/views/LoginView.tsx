@@ -26,6 +26,7 @@ import {
 export const LoginView: React.FC = () => {
   const {
     loginWithCredentials,
+    registerStudent,
     loginWithGoogle,
     requestPasswordRecovery,
     redirectTarget,
@@ -34,6 +35,10 @@ export const LoginView: React.FC = () => {
   } = useExam();
 
   const [selectedRole, setSelectedRole] = useState<UserRole>('STUDENT');
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [fullName, setFullName] = useState('');
+  const [regExamCategory, setRegExamCategory] = useState<'JEE_MAIN' | 'JEE_ADVANCED' | 'NEET'>('JEE_MAIN');
+  const [regTargetYear, setRegTargetYear] = useState<number>(2026);
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -53,6 +58,7 @@ export const LoginView: React.FC = () => {
 
   const handleRoleSwitch = (role: UserRole) => {
     setSelectedRole(role);
+    setIsRegisterMode(false);
     setIdentifier('');
     setPassword('');
     setErrorMsg(null);
@@ -66,10 +72,31 @@ export const LoginView: React.FC = () => {
     setErrorMsg(null);
     setAccountStatusAlert(null);
 
+    if (isRegisterMode && selectedRole === 'STUDENT') {
+      if (!fullName.trim() || !identifier.trim() || !password) {
+        setErrorMsg('Please enter your full name, email address, and password to register.');
+        return;
+      }
+      setIsLoading(true);
+      const regRes = await registerStudent({
+        fullName: fullName.trim(),
+        email: identifier.trim(),
+        password,
+        examCategory: regExamCategory,
+        targetYear: regTargetYear,
+        className: 'Class 12',
+      });
+      setIsLoading(false);
+      if (!regRes.success) {
+        setErrorMsg(regRes.error || 'Registration failed.');
+      }
+      return;
+    }
+
     if (!identifier.trim() || !password) {
       setErrorMsg(
         selectedRole === 'STUDENT'
-          ? 'Please enter your assigned Student ID and password.'
+          ? 'Please enter your assigned Student ID (or registered email) and password.'
           : selectedRole === 'TEACHER'
           ? 'Please enter your Faculty Email/Username and password.'
           : 'Please enter your Administrator Email and password.'
@@ -293,7 +320,7 @@ export const LoginView: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <Terminal className="w-4 h-4 text-indigo-400" />
                   <span className="text-xs font-bold text-slate-200">
-                    Quick-Fill Verification Accounts (Click to Populate)
+                    Demonstration Accounts (Synthetic Sandbox — Click to Populate)
                   </span>
                 </div>
                 {showQuickTester ? (
@@ -305,6 +332,9 @@ export const LoginView: React.FC = () => {
 
               {showQuickTester && (
                 <div className="px-4 pb-4 pt-1 border-t border-slate-800/80 space-y-2 text-xs">
+                  <p className="text-[11px] text-slate-400 pb-1">
+                    Demonstration accounts are isolated sandbox profiles for evaluating Student, Teacher, and Administrator workflows.
+                  </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
                       type="button"
@@ -563,22 +593,109 @@ export const LoginView: React.FC = () => {
 
                 {!isForgotMode ? (
                   <form onSubmit={handleLoginSubmit} className="space-y-5">
+                    {selectedRole === 'STUDENT' && (
+                      <div className="flex items-center gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsRegisterMode(false);
+                            setErrorMsg(null);
+                          }}
+                          className={`flex-1 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                            !isRegisterMode
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Sign In (Existing Candidate)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsRegisterMode(true);
+                            setErrorMsg(null);
+                          }}
+                          className={`flex-1 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                            isRegisterMode
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Register New Student Account
+                        </button>
+                      </div>
+                    )}
+
+                    {isRegisterMode && selectedRole === 'STUDENT' && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                            Candidate Full Name
+                          </label>
+                          <input
+                            type="text"
+                            value={fullName}
+                            onChange={(e) => setFullName(e.target.value)}
+                            placeholder="e.g. Siddharth Sharma"
+                            required
+                            className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                            Enrolled Course / Exam
+                          </label>
+                          <select
+                            value={regExamCategory}
+                            onChange={(e) =>
+                              setRegExamCategory(
+                                e.target.value as 'JEE_MAIN' | 'JEE_ADVANCED' | 'NEET'
+                              )
+                            }
+                            className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-indigo-500"
+                          >
+                            <option value="JEE_MAIN">JEE (Main) Engineering</option>
+                            <option value="JEE_ADVANCED">JEE (Main + Advanced)</option>
+                            <option value="NEET">NEET (UG) Medical</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                            Target Examination Year
+                          </label>
+                          <select
+                            value={regTargetYear}
+                            onChange={(e) => setRegTargetYear(Number(e.target.value))}
+                            className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-indigo-500"
+                          >
+                            <option value={2026}>2026</option>
+                            <option value={2027}>2027</option>
+                            <option value={2028}>2028</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Role-Specific Identifier Field */}
                     <div>
                       <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
                         {selectedRole === 'STUDENT'
-                          ? 'Student ID'
+                          ? isRegisterMode
+                            ? 'Student Email Address'
+                            : 'Student ID or Email'
                           : selectedRole === 'TEACHER'
                           ? 'Email / Username'
                           : 'Admin Email'}
                       </label>
                       <input
-                        type="text"
+                        type={isRegisterMode ? 'email' : 'text'}
                         value={identifier}
                         onChange={(e) => setIdentifier(e.target.value)}
                         placeholder={
                           selectedRole === 'STUDENT'
-                            ? 'e.g. JEE26-10001 or NEET26-10001'
+                            ? isRegisterMode
+                              ? 'e.g. candidate@example.com'
+                              : 'e.g. JEE26-10001 or NEET26-10001'
                             : selectedRole === 'TEACHER'
                             ? 'e.g. hcverma@ntapulse.edu.in or hcverma'
                             : 'e.g. admin@ntapulse.edu.in'
@@ -586,7 +703,9 @@ export const LoginView: React.FC = () => {
                         autoComplete="username"
                         required
                         className={`w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors ${
-                          selectedRole === 'STUDENT' ? 'font-mono uppercase tracking-wider' : ''
+                          selectedRole === 'STUDENT' && !isRegisterMode
+                            ? 'font-mono uppercase tracking-wider'
+                            : ''
                         }`}
                       />
                     </div>
@@ -595,19 +714,21 @@ export const LoginView: React.FC = () => {
                     <div>
                       <div className="flex items-center justify-between mb-2">
                         <label className="block text-xs font-bold uppercase tracking-wider text-slate-300">
-                          Password
+                          {isRegisterMode ? 'Create Password (Min 8 chars, A-z, 0-9, @!)' : 'Password'}
                         </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsForgotMode(true);
-                            setErrorMsg(null);
-                            setRecoverySuccessMsg(null);
-                          }}
-                          className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer"
-                        >
-                          Forgot password?
-                        </button>
+                        {!isRegisterMode && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsForgotMode(true);
+                              setErrorMsg(null);
+                              setRecoverySuccessMsg(null);
+                            }}
+                            className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer"
+                          >
+                            Forgot password?
+                          </button>
+                        )}
                       </div>
                       <div className="relative">
                         <input
@@ -667,7 +788,9 @@ export const LoginView: React.FC = () => {
                         {isLoading
                           ? 'Verifying Credentials & Session...'
                           : selectedRole === 'STUDENT'
-                          ? 'Sign In to Student Examination Portal'
+                          ? isRegisterMode
+                            ? 'Register & Generate Student ID'
+                            : 'Sign In to Student Examination Portal'
                           : selectedRole === 'TEACHER'
                           ? 'Sign In to Teacher Control Panel'
                           : 'Sign In to Administrator Console'}
@@ -675,7 +798,7 @@ export const LoginView: React.FC = () => {
                       <ArrowRight className="w-4 h-4" />
                     </button>
 
-                    {/* Google Sign-In via Firebase Auth + PostgreSQL User Sync */}
+                    {/* Google Sign-In via Supabase Auth + PostgreSQL User Sync */}
                     <div className="pt-2">
                       <button
                         type="button"
@@ -693,7 +816,7 @@ export const LoginView: React.FC = () => {
                         className="w-full py-3 px-4 rounded-xl border border-slate-700 bg-slate-900/90 hover:bg-slate-800 text-slate-200 font-bold text-xs tracking-wide transition-colors flex items-center justify-center gap-2.5 cursor-pointer"
                       >
                         <UserCheck className="w-4 h-4 text-sky-400" />
-                        <span>Sign In with Google (Cloud SQL Profile Sync)</span>
+                        <span>Sign In with Google (Supabase Auth &amp; PostgreSQL Sync)</span>
                       </button>
                     </div>
                   </form>

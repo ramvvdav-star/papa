@@ -411,6 +411,21 @@ export async function getAuditLogs(limit = 100): Promise<AuditLogRecord[]> {
 
 // ----------------- DATABASE SEEDING FOR AUTH & RBAC -----------------
 
+export const DEMO_ACCOUNT_IDS = new Set([
+  'usr-admin-01',
+  'usr-teacher-hcverma',
+  'usr-teacher-ritusharma',
+  'usr-student-rahul',
+  'usr-student-aarav',
+  'usr-student-ananya',
+  'usr-student-rohan',
+  'usr-student-vikram',
+]);
+
+export function isDemoAccountId(userId: string): boolean {
+  return DEMO_ACCOUNT_IDS.has(userId);
+}
+
 let isAuthSeeded = false;
 
 export async function ensureAuthSeeded(): Promise<void> {
@@ -429,6 +444,10 @@ export async function ensureAuthSeeded(): Promise<void> {
     const student3Id = 'usr-student-ananya';
     const student4Id = 'usr-student-rohan';
     const student5Id = 'usr-student-vikram';
+
+    const demoAdminPass = process.env.DEMO_ADMIN_PASSWORD || 'Admin@2026!';
+    const demoTeacherPass = process.env.DEMO_TEACHER_PASSWORD || 'Teacher@2026!';
+    const demoStudentPass = process.env.DEMO_STUDENT_PASSWORD || 'Student@2026!';
 
     // Always ensure canonical courses, enrollments, and study materials exist
     await db
@@ -634,18 +653,23 @@ export async function ensureAuthSeeded(): Promise<void> {
 
     await updateStudentIdConfig(DEFAULT_STUDENT_ID_CONFIG);
 
+    if (process.env.ENABLE_DEMO_ACCOUNTS === 'false') {
+      isAuthSeeded = true;
+      return;
+    }
+
     await db.insert(profiles).values([
       {
         id: adminId,
         username: 'admin',
         email: 'admin@ntapulse.edu.in',
-        fullName: 'Dr. Rajeshwar Rao (Chief Controller of Examinations)',
-        passwordHash: hashPassword('Admin@2026!'),
+        fullName: 'Dr. Rajeshwar Rao (Demo Administrator)',
+        passwordHash: hashPassword(demoAdminPass),
         role: 'ADMIN',
         studentId: null,
         teacherId: null,
         batchId: null,
-        className: 'Administration',
+        className: 'Administration (Demo)',
         examCategory: 'JEE_MAIN',
         courseId: 'course_jee',
         courseType: 'JEE',
@@ -671,13 +695,13 @@ export async function ensureAuthSeeded(): Promise<void> {
         id: teacher1Id,
         username: 'hcverma',
         email: 'hcverma@ntapulse.edu.in',
-        fullName: 'Prof. H.C. Verma (HOD Physics & JEE Mentor)',
-        passwordHash: hashPassword('Teacher@2026!'),
+        fullName: 'Prof. H.C. Verma (Demo JEE Faculty)',
+        passwordHash: hashPassword(demoTeacherPass),
         role: 'TEACHER',
         studentId: null,
         teacherId: null,
         batchId: null,
-        className: 'JEE Faculty',
+        className: 'JEE Faculty (Demo)',
         examCategory: 'JEE_MAIN',
         courseId: 'course_jee',
         courseType: 'JEE',
@@ -697,13 +721,13 @@ export async function ensureAuthSeeded(): Promise<void> {
         id: teacher2Id,
         username: 'ritusharma',
         email: 'ritusharma@ntapulse.edu.in',
-        fullName: 'Dr. Ritu Sharma (Senior NEET Biology & Chemistry Faculty)',
-        passwordHash: hashPassword('Teacher@2026!'),
+        fullName: 'Dr. Ritu Sharma (Demo NEET Faculty)',
+        passwordHash: hashPassword(demoTeacherPass),
         role: 'TEACHER',
         studentId: null,
         teacherId: null,
         batchId: null,
-        className: 'NEET Faculty',
+        className: 'NEET Faculty (Demo)',
         examCategory: 'NEET',
         courseId: 'course_neet',
         courseType: 'NEET',
@@ -723,8 +747,8 @@ export async function ensureAuthSeeded(): Promise<void> {
         id: student1Id,
         username: null,
         email: 'rahul.verma@student.ntapulse.edu.in',
-        fullName: 'Rahul Verma',
-        passwordHash: hashPassword('Student@2026!'),
+        fullName: 'Rahul Verma (Demo JEE Student)',
+        passwordHash: hashPassword(demoStudentPass),
         role: 'STUDENT',
         studentId: 'JEE26-10001',
         teacherId: teacher1Id,
@@ -1780,6 +1804,18 @@ export async function deleteProfileByAdmin(params: {
   if (params.targetUserId === params.actor.id) {
     return { success: false, error: 'You cannot delete your own active Administrator account.' };
   }
+  if (isDemoAccountId(params.targetUserId)) {
+    return {
+      success: false,
+      error: 'Demo Protected Account — Seeded demonstration accounts cannot be permanently deleted.',
+    };
+  }
+  if (isDemoAccountId(params.actor.id) && !isDemoAccountId(params.targetUserId) && process.env.NODE_ENV === 'production') {
+    return {
+      success: false,
+      error: 'Demo Mode Restriction — Demo administrator accounts cannot delete real user accounts in production.',
+    };
+  }
 
   const rows = await db.select().from(profiles).where(eq(profiles.id, params.targetUserId));
   if (rows.length === 0) return { success: false, error: 'Account not found.' };
@@ -2403,7 +2439,9 @@ export async function deleteStudyMaterialRecord(id: string): Promise<void> {
   await db.delete(studyMaterials).where(eq(studyMaterials.id, id));
 }
 
-export async function getOrCreateFirebaseProfile(params: {
+// ----------------- SUPABASE AUTH & STUDENT REGISTRATION OPERATIONS -----------------
+
+export async function getOrCreateSupabaseProfile(params: {
   uid: string;
   email: string;
   displayName?: string;
@@ -2412,14 +2450,14 @@ export async function getOrCreateFirebaseProfile(params: {
   await ensureAuthSeeded();
   const existingById = await getProfileById(params.uid);
   if (existingById) {
-    const rawToken = `fb_${params.uid}_${crypto.randomBytes(16).toString('hex')}`;
+    const rawToken = `sb_${params.uid}_${crypto.randomBytes(16).toString('hex')}`;
     const tokenHash = hashToken(rawToken);
     await db.insert(authSessions).values({
       id: `sess-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       tokenHash,
       userId: existingById.id,
       role: existingById.role,
-      userAgent: 'Firebase OAuth Client',
+      userAgent: 'Supabase Auth Client',
       ipAddress: '127.0.0.1',
       rememberMe: true,
       expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
@@ -2434,14 +2472,14 @@ export async function getOrCreateFirebaseProfile(params: {
     ? all.find((p) => (p.email || '').toLowerCase() === params.email.toLowerCase())
     : undefined;
   if (existingByEmail) {
-    const rawToken = `fb_${existingByEmail.id}_${crypto.randomBytes(16).toString('hex')}`;
+    const rawToken = `sb_${existingByEmail.id}_${crypto.randomBytes(16).toString('hex')}`;
     const tokenHash = hashToken(rawToken);
     await db.insert(authSessions).values({
       id: `sess-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       tokenHash,
       userId: existingByEmail.id,
       role: existingByEmail.role,
-      userAgent: 'Firebase OAuth Client',
+      userAgent: 'Supabase Auth Client',
       ipAddress: '127.0.0.1',
       rememberMe: true,
       expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
@@ -2486,21 +2524,21 @@ export async function getOrCreateFirebaseProfile(params: {
       courseId: resolved.courseId,
       courseType: resolved.courseType,
       status: 'ACTIVE',
-      assignedBy: 'usr-admin-1',
+      assignedBy: 'usr-admin-01',
       createdAt: now,
       updatedAt: now,
     })
     .onConflictDoNothing();
 
   const createdProfile = (await getProfileById(params.uid))!;
-  const rawToken = `fb_${params.uid}_${crypto.randomBytes(16).toString('hex')}`;
+  const rawToken = `sb_${params.uid}_${crypto.randomBytes(16).toString('hex')}`;
   const tokenHash = hashToken(rawToken);
   await db.insert(authSessions).values({
     id: `sess-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
     tokenHash,
     userId: createdProfile.id,
     role: createdProfile.role,
-    userAgent: 'Firebase OAuth Client',
+    userAgent: 'Supabase Auth Client',
     ipAddress: '127.0.0.1',
     rememberMe: true,
     expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
@@ -2510,5 +2548,169 @@ export async function getOrCreateFirebaseProfile(params: {
 
   return { profile: createdProfile, token: rawToken };
 }
+
+export async function registerStudentAccount(params: {
+  fullName: string;
+  email: string;
+  password: string;
+  examCategory?: ExamType;
+  targetYear?: number;
+  className?: string;
+}): Promise<{
+  success: boolean;
+  error?: string;
+  token?: string;
+  profile?: AuthProfile;
+}> {
+  await ensureAuthSeeded();
+  const cleanEmail = params.email.trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    return { success: false, error: 'Please provide a valid email address.' };
+  }
+  const passCheck = validatePasswordComplexity(params.password);
+  if (!passCheck.valid) {
+    return { success: false, error: passCheck.message };
+  }
+
+  const all = await getAllProfiles();
+  if (all.some((p) => (p.email || '').toLowerCase() === cleanEmail)) {
+    return {
+      success: false,
+      error: 'An account with this email address already exists. Please sign in instead.',
+    };
+  }
+
+  const examCat: ExamType = params.examCategory || 'JEE_MAIN';
+  const resolved = resolveCourseFromExam(examCat);
+  const studentId = await generateUniqueStudentId(examCat);
+  const userId = `usr-stu-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date();
+
+  await db.insert(profiles).values({
+    id: userId,
+    username: studentId.toLowerCase(),
+    email: cleanEmail,
+    fullName: params.fullName.trim() || 'Student Candidate',
+    passwordHash: hashPassword(params.password),
+    role: 'STUDENT',
+    studentId,
+    className: params.className || 'Class 12',
+    examCategory: examCat,
+    courseId: resolved.courseId,
+    courseType: resolved.courseType,
+    enrollmentStatus: 'ACTIVE',
+    assignedCoursesJson: JSON.stringify(resolved.assignedCourses),
+    targetYear: Number(params.targetYear) || 2026,
+    subjectAccessJson: JSON.stringify(resolved.defaultSubjects),
+    testAccessJson: JSON.stringify([]),
+    teacherPermissionsJson: JSON.stringify({}),
+    status: 'ACTIVE',
+    mustChangePassword: false,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await db
+    .insert(enrollments)
+    .values({
+      id: `enr-${userId}-${resolved.courseId}`,
+      studentId: userId,
+      courseId: resolved.courseId,
+      courseType: resolved.courseType,
+      status: 'ACTIVE',
+      assignedBy: userId,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing();
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(rawToken);
+  await db.insert(authSessions).values({
+    id: `sess-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    tokenHash,
+    userId,
+    role: 'STUDENT',
+    userAgent: 'Web Registration',
+    ipAddress: '127.0.0.1',
+    rememberMe: true,
+    expiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000),
+    revoked: false,
+    createdAt: now,
+  });
+
+  await createAuditLog({
+    actorId: userId,
+    actorName: params.fullName.trim(),
+    actorRole: 'STUDENT',
+    action: 'STUDENT_SELF_REGISTER',
+    target: `${studentId} (${cleanEmail})`,
+    details: `Registered for ${resolved.courseType} (${examCat})`,
+  });
+
+  const profile = await getProfileById(userId);
+  return {
+    success: true,
+    token: rawToken,
+    profile: profile || undefined,
+  };
+}
+
+export async function updateSelfProfile(params: {
+  userId: string;
+  fullName?: string;
+  targetYear?: number;
+  className?: string;
+}): Promise<AuthProfile | null> {
+  const updateData: Record<string, unknown> = { updatedAt: new Date() };
+  if (params.fullName && params.fullName.trim()) {
+    updateData.fullName = params.fullName.trim();
+  }
+  if (params.targetYear && Number(params.targetYear) >= 2025) {
+    updateData.targetYear = Number(params.targetYear);
+  }
+  if (params.className && params.className.trim()) {
+    updateData.className = params.className.trim();
+  }
+  await db.update(profiles).set(updateData).where(eq(profiles.id, params.userId));
+  return getProfileById(params.userId);
+}
+
+// ----------------- PERSISTENT PLATFORM SETTINGS & BLUEPRINTS -----------------
+
+export async function getPlatformSetting<T>(key: string, fallback: T): Promise<T> {
+  try {
+    const rows = await db
+      .select()
+      .from(platformSettings)
+      .where(eq(platformSettings.key, key));
+    if (rows.length === 0) return fallback;
+    return parseJsonSafe<T>(rows[0].valueJson, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+export async function setPlatformSetting<T>(key: string, value: T): Promise<T> {
+  const now = new Date();
+  const valueJson = JSON.stringify(value);
+  await db
+    .insert(platformSettings)
+    .values({
+      key,
+      valueJson,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: platformSettings.key,
+      set: {
+        valueJson,
+        updatedAt: now,
+      },
+    });
+  return value;
+}
+
+
 
 
