@@ -1,4 +1,3 @@
-// Imports the cohesive Express app compiled directly by esbuild
-import app from '../dist/server.js';
+import app from '../dist-server/server.js';
 
 export default app;
