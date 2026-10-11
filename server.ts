@@ -2,9 +2,9 @@ import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
-import { SEED_TESTS } from 'src/data/seedTests';
-import { getCentralizedQuestionBank } from 'src/data/fullLengthPapersGenerator';;
-import { OFFICIAL_EXAM_BLUEPRINTS } from 'src/data/officialExamPatterns';
+import { SEED_TESTS } from './src/data/seedTests.js';
+import { getCentralizedQuestionBank } from './src/data/fullLengthPapersGenerator.js';
+import { OFFICIAL_EXAM_BLUEPRINTS } from './src/data/officialExamPatterns.js';
 import {
   selectQuestionsIntelligent,
   selectQuestionsForBlueprint,
@@ -14,7 +14,7 @@ import {
   createOrResolveAttemptSnapshot,
   auditQuestionBankAndTests,
   normalizeQuestion,
-} from 'src/data/questionBankEngine';
+} from './src/data/questionBankEngine.js';
 import {
   Question,
   TestDefinition,
