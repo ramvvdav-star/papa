@@ -9,8 +9,8 @@ import type {
   TestDefinition,
   TestAttemptSnapshot,
   TestQuestionMapping,
-} from '../types/exam.ts';
-import { OFFICIAL_EXAM_BLUEPRINTS } from './officialExamPatterns.ts';
+} from '../types/exam.js';
+import { OFFICIAL_EXAM_BLUEPRINTS } from './officialExamPatterns.js';
 
 // ============================================================================
 // PART 1 & 3: NORMALIZATION, FINGERPRINTING & CANONICAL QUESTION IDS

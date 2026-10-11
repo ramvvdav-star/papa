@@ -1,4 +1,4 @@
-import { db } from './index.ts';
+import { db } from './index.js';
 import {
   questions,
   tests,
@@ -6,7 +6,7 @@ import {
   activeExamSessions,
   questionBookmarks,
   questionReports,
-} from './schema.ts';
+} from './schema.js';
 import { eq, desc, sql } from 'drizzle-orm';
 import {
   Question,
@@ -17,9 +17,9 @@ import {
   ActiveExamSession,
   QuestionBookmark,
   QuestionReport,
-} from '../types/exam';
-import { generateQuestionBank } from './questionBankGenerator';
-import { SEED_TESTS } from '../data/seedTests';
+} from '../types/exam.js';
+import { generateQuestionBank } from './questionBankGenerator.js';
+import { SEED_TESTS } from '../data/seedTests.js';
 import {
   normalizeQuestion,
   computeQuestionFingerprint,
@@ -29,7 +29,7 @@ import {
   syncUsageRegistryFromTests,
   deduplicateAndMigrateQuestionBank,
   buildTestQuestionMappings,
-} from '../data/questionBankEngine';
+} from '../data/questionBankEngine.js';
 
 // Canonical courseId normalizer so 'course-neet-ug', 'course_neet', 'NEET', etc. map cleanly
 export function normalizeCanonicalCourse(
@@ -684,7 +684,7 @@ export async function saveAttemptToDb(attempt: TestAttemptResult) {
         courseId: cInfo.courseId,
         courseType: cInfo.courseType,
         examType: enrichedAttempt.examType,
-        userId: enrichedAttempt.userId,
+        studentId: enrichedAttempt.userId,
         userName: enrichedAttempt.userName,
         timeTakenSeconds: enrichedAttempt.timeTakenSeconds,
         totalScore: enrichedAttempt.totalScore,
@@ -718,6 +718,7 @@ export async function getAttemptsFromDb(): Promise<TestAttemptResult[]> {
         const cInfo = normalizeCanonicalCourse(r.courseId || item.courseId, r.examType as ExamType);
         parsed.push({
           ...item,
+          userId: r.studentId || item.userId,
           courseId: cInfo.courseId,
           courseType: cInfo.courseType,
         });

@@ -1,7 +1,7 @@
-import { db } from './index.ts';
-import { users } from './schema.ts';
+import { db } from './index.js';
+import { users } from './schema.js';
 import { eq } from 'drizzle-orm';
-import { ensureSchemaBootstrapped, isDatabaseReachable } from './bootstrapSchema.ts';
+import { ensureSchemaBootstrapped, isDatabaseReachable } from './bootstrapSchema.js';
 
 export async function getOrCreateUser(uid: string, email: string, displayName?: string) {
   const fallbackUser = {

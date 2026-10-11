@@ -5,7 +5,7 @@ import type {
   Difficulty,
   QuestionType,
   PYQMetadata,
-} from '../types/exam.ts';
+} from '../types/exam.js';
 
 export interface DomainGeneratorSpec {
   id: string;

@@ -1,13 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
-import { supabaseAdmin } from '../lib/supabaseServer.ts';
-import { getOrCreateUser } from '../db/users.ts';
+import { supabaseAdmin } from '../lib/supabaseServer.js';
+import { getOrCreateUser } from '../db/users.js';
 import {
   verifySessionToken,
   getOrCreateSupabaseProfile,
   isCourseAuthorizedForUser,
   getAuthorizedCourseTypes,
-} from '../db/authRepository.ts';
-import type { AuthProfile, UserRole } from '../types/auth.ts';
+} from '../db/authRepository.js';
+import type { AuthProfile, UserRole } from '../types/auth.js';
 
 export interface AuthenticatedRequest extends Request {
   authProfile?: AuthProfile;

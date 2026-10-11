@@ -8,7 +8,7 @@ import {
   MistakeCategoryBreakdown, 
   PracticeRecommendation,
   SubjectName
-} from '../types/exam';
+} from '../types/exam.js';
 
 function normalizeOptionSet(val?: string): string {
   if (!val) return '';

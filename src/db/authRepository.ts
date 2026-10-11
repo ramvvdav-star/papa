@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { eq, desc, or, and, sql } from 'drizzle-orm';
-import { db } from './index.ts';
+import { db } from './index.js';
 import {
   courses,
   enrollments,
@@ -13,7 +13,7 @@ import {
   auditLogs,
   passwordRecoveryRequests,
   platformSettings,
-} from './schema.ts';
+} from './schema.js';
 import {
   AuthProfile,
   UserRole,
@@ -30,8 +30,8 @@ import {
   PasswordRecoveryRecord,
   StudentIdConfig,
   TeacherPermissions,
-} from '../types/auth.ts';
-import { ExamType, SubjectName } from '../types/exam.ts';
+} from '../types/auth.js';
+import { ExamType, SubjectName } from '../types/exam.js';
 
 // ----------------- COURSE & ENROLLMENT AUTHORIZATION HELPERS -----------------
 

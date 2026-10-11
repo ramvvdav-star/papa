@@ -6,10 +6,10 @@
  */
 
 import dotenv from 'dotenv';
-import { ensureSchemaBootstrapped, isDatabaseReachable } from '../src/db/bootstrapSchema';
-import { ensureAuthSeeded, getAllProfiles, getAllCourses, getAllEnrollments, getAllBatches } from '../src/db/authRepository';
-import { ensureDatabaseSeeded, getAllTestsFromDb, getCachedQuestionBank } from '../src/db/repository';
-import { auditQuestionBankAndTests } from '../src/data/questionBankEngine';
+import { ensureSchemaBootstrapped, isDatabaseReachable } from '../src/db/bootstrapSchema.js';
+import { ensureAuthSeeded, getAllProfiles, getAllCourses, getAllEnrollments, getAllBatches } from '../src/db/authRepository.js';
+import { ensureDatabaseSeeded, getAllTestsFromDb, getCachedQuestionBank } from '../src/db/repository.js';
+import { auditQuestionBankAndTests } from '../src/data/questionBankEngine.js';
 
 dotenv.config();
 

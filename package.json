@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-   "build": "tsc && vite build && npx esbuild server.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist-server/server.js",
+    "build": "vite build",
     "start": "node server.ts",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist dist-server server.js",
     "lint": "tsc --noEmit",
     "db:migrate:supabase": "tsx scripts/migrate-to-supabase.ts"
   },

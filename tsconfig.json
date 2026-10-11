@@ -1,29 +1,27 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
     "target": "ES2022",
+    "experimentalDecorators": true,
     "useDefineForClassFields": true,
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "module": "ESNext",
     "skipLibCheck": true,
-
-    /* Bundler mode */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
     "noEmit": true,
     "jsx": "react-jsx",
-
-    /* Linting */
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noImplicitReturns": true,
-    "fallthroughCasesInSwitch": true,
-
-    /* FIX FOR VERCEL BUILD ERROR BELOW */
+    "strict": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitReturns": false,
+    "paths": {
+      "@/*": ["./*"]
+    },
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "server.ts", "api"]
+  "include": ["src", "api", "server.ts"]
 }

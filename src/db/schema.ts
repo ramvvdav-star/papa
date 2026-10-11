@@ -257,7 +257,7 @@ export const tests = pgTable('tests', {
   index('idx_tests_published').on(table.published),
 ]);
 
-// Test Attempts table with strict course_id & user_id ownership
+// Test Attempts table with strict course_id & student_id ownership
 export const testAttempts = pgTable('test_attempts', {
   id: text('id').primaryKey(),
   testId: text('test_id').notNull(),
@@ -265,7 +265,7 @@ export const testAttempts = pgTable('test_attempts', {
   courseId: text('course_id').default('course_jee').notNull(),
   courseType: text('course_type').default('JEE').notNull(),
   examType: text('exam_type').notNull(),
-  userId: text('user_id').notNull(),
+  studentId: text('student_id').notNull(),
   userName: text('user_name').notNull(),
   startedAt: timestamp('started_at').defaultNow(),
   submittedAt: timestamp('submitted_at').defaultNow(),
@@ -285,7 +285,7 @@ export const testAttempts = pgTable('test_attempts', {
   practiceRank: integer('practice_rank').notNull(),
   resultJson: text('result_json').notNull(),
 }, (table) => [
-  index('idx_attempts_user_id').on(table.userId),
+  index('idx_attempts_student_id').on(table.studentId),
   index('idx_attempts_test_id').on(table.testId),
   index('idx_attempts_course_id').on(table.courseId),
 ]);

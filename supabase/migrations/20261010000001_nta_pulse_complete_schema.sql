@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS public.tests (
   sections_json text,
   description text,
   question_ids_json text NOT NULL,
+  test_data_json text,
   test_questions_json text NOT NULL DEFAULT '[]',
   attempt_snapshots_json text NOT NULL DEFAULT '[]',
   active_attempt_set text NOT NULL DEFAULT 'Set A',
@@ -300,7 +301,7 @@ CREATE TABLE IF NOT EXISTS public.test_attempts (
   course_id text NOT NULL DEFAULT 'course_jee',
   course_type text NOT NULL DEFAULT 'JEE',
   exam_type text NOT NULL,
-  user_id text NOT NULL,
+  student_id text NOT NULL,
   user_name text NOT NULL,
   started_at timestamptz DEFAULT now(),
   submitted_at timestamptz DEFAULT now(),
@@ -320,7 +321,7 @@ CREATE TABLE IF NOT EXISTS public.test_attempts (
   practice_rank integer NOT NULL,
   result_json text NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_attempts_user_id ON public.test_attempts (user_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_student_id ON public.test_attempts (student_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_test_id ON public.test_attempts (test_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_course_id ON public.test_attempts (course_id);
 
@@ -328,29 +329,34 @@ CREATE INDEX IF NOT EXISTS idx_attempts_course_id ON public.test_attempts (cours
 CREATE TABLE IF NOT EXISTS public.active_exam_sessions (
   user_id text PRIMARY KEY,
   test_id text NOT NULL,
+  course_id text NOT NULL DEFAULT 'course_jee',
+  exam_mode text NOT NULL DEFAULT 'SIMULATION',
+  timer_seconds_left integer NOT NULL DEFAULT 0,
+  current_question_idx integer NOT NULL DEFAULT 0,
   attempt_set_label text NOT NULL DEFAULT 'Set A',
   session_json text NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 -- 19. Student Question Bookmarks & Revision Notes Table
-CREATE TABLE IF NOT EXISTS public.user_bookmarks (
+CREATE TABLE IF NOT EXISTS public.question_bookmarks (
   id text PRIMARY KEY,
   user_id text NOT NULL,
   question_id text NOT NULL,
-  collection text NOT NULL DEFAULT 'General Revision',
+  course_id text NOT NULL DEFAULT 'course_jee',
+  collection text NOT NULL DEFAULT 'Important Revision',
   note text,
   question_json text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_user_bookmarks_user_id ON public.user_bookmarks (user_id);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_user_id ON public.question_bookmarks (user_id);
 
 -- 20. Question Error & Challenge Reports Table
 CREATE TABLE IF NOT EXISTS public.question_reports (
   id text PRIMARY KEY,
   question_id text NOT NULL,
   test_id text,
-  student_id text NOT NULL,
+  user_id text NOT NULL,
   student_name text NOT NULL,
   reason text NOT NULL,
   description text NOT NULL,

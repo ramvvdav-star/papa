@@ -1,4 +1,4 @@
-import { createPool, isDatabaseConfigured } from './index.ts';
+import { createPool, isDatabaseConfigured } from './index.js';
 
 let schemaBootstrapped = false;
 let schemaBootstrapPromise: Promise<boolean> | null = null;
@@ -44,8 +44,8 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
 
         CREATE TABLE IF NOT EXISTS "courses" (
           "id" text PRIMARY KEY,
-          "name" text NOT NULL,
-          "type" text NOT NULL,
+          "name" text NOT NULL DEFAULT '',
+          "type" text NOT NULL DEFAULT 'JEE',
           "description" text NOT NULL DEFAULT '',
           "active" boolean NOT NULL DEFAULT true,
           "created_at" timestamp NOT NULL DEFAULT now()
@@ -140,8 +140,8 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
           "course_id" text NOT NULL DEFAULT 'course_jee',
           "course_type" text NOT NULL DEFAULT 'JEE',
           "class_name" text NOT NULL DEFAULT 'Class 12',
-          "teacher_id" text NOT NULL,
-          "teacher_name" text NOT NULL,
+          "teacher_id" text NOT NULL DEFAULT 'usr-teacher-01',
+          "teacher_name" text NOT NULL DEFAULT 'Faculty',
           "status" text NOT NULL DEFAULT 'ACTIVE',
           "assigned_test_ids_json" text NOT NULL DEFAULT '[]',
           "student_ids_json" text NOT NULL DEFAULT '[]',
@@ -155,7 +155,7 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
           "test_id" text NOT NULL UNIQUE,
           "course_id" text NOT NULL DEFAULT 'course_jee',
           "visibility" text NOT NULL DEFAULT 'PUBLIC',
-          "assigned_by_user_id" text NOT NULL,
+          "assigned_by_user_id" text NOT NULL DEFAULT 'usr-admin-01',
           "assigned_teacher_ids_json" text NOT NULL DEFAULT '[]',
           "assigned_batch_ids_json" text NOT NULL DEFAULT '[]',
           "assigned_student_ids_json" text NOT NULL DEFAULT '[]',
@@ -166,7 +166,7 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
         CREATE TABLE IF NOT EXISTS "announcements" (
           "id" text PRIMARY KEY,
           "title" text NOT NULL,
-          "content" text NOT NULL,
+          "content" text NOT NULL DEFAULT '',
           "course_id" text NOT NULL DEFAULT 'ALL',
           "course_type" text NOT NULL DEFAULT 'ALL',
           "author_id" text NOT NULL,
@@ -193,7 +193,7 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
           "id" text PRIMARY KEY,
           "user_id" text NOT NULL,
           "identifier" text NOT NULL,
-          "user_name" text NOT NULL,
+          "user_name" text NOT NULL DEFAULT '',
           "user_role" text NOT NULL,
           "teacher_id" text,
           "reason" text DEFAULT 'Forgot password / requested credential reset',
@@ -276,6 +276,7 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
           "sections_json" text,
           "description" text,
           "question_ids_json" text NOT NULL,
+          "test_data_json" text,
           "test_questions_json" text NOT NULL DEFAULT '[]',
           "attempt_snapshots_json" text NOT NULL DEFAULT '[]',
           "active_attempt_set" text NOT NULL DEFAULT 'Set A',
@@ -307,37 +308,55 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
           "course_id" text NOT NULL DEFAULT 'course_jee',
           "course_type" text NOT NULL DEFAULT 'JEE',
           "exam_type" text NOT NULL,
-          "user_id" text NOT NULL,
-          "user_name" text NOT NULL,
+          "student_id" text NOT NULL DEFAULT '',
+          "user_id" text DEFAULT '',
+          "user_name" text NOT NULL DEFAULT '',
           "started_at" timestamp DEFAULT now(),
           "submitted_at" timestamp DEFAULT now(),
-          "time_taken_seconds" integer NOT NULL,
-          "total_score" integer NOT NULL,
-          "max_score" integer NOT NULL,
-          "percentage" integer NOT NULL,
-          "accuracy" integer NOT NULL,
-          "attempt_rate" integer NOT NULL,
-          "total_questions" integer NOT NULL,
-          "total_attempted" integer NOT NULL,
-          "total_correct" integer NOT NULL,
-          "total_incorrect" integer NOT NULL,
-          "total_unanswered" integer NOT NULL,
-          "negative_marks_lost" integer NOT NULL,
-          "simulated_percentile" real NOT NULL,
-          "practice_rank" integer NOT NULL,
+          "time_taken_seconds" integer NOT NULL DEFAULT 0,
+          "total_score" integer NOT NULL DEFAULT 0,
+          "max_score" integer NOT NULL DEFAULT 0,
+          "percentage" integer NOT NULL DEFAULT 0,
+          "accuracy" integer NOT NULL DEFAULT 0,
+          "attempt_rate" integer NOT NULL DEFAULT 0,
+          "total_questions" integer NOT NULL DEFAULT 0,
+          "total_attempted" integer NOT NULL DEFAULT 0,
+          "total_correct" integer NOT NULL DEFAULT 0,
+          "total_incorrect" integer NOT NULL DEFAULT 0,
+          "total_unanswered" integer NOT NULL DEFAULT 0,
+          "negative_marks_lost" integer NOT NULL DEFAULT 0,
+          "simulated_percentile" real NOT NULL DEFAULT 0,
+          "practice_rank" integer NOT NULL DEFAULT 1,
           "result_json" text NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS "idx_attempts_user_id" ON "test_attempts" ("user_id");
+        CREATE INDEX IF NOT EXISTS "idx_attempts_student_id" ON "test_attempts" ("student_id");
         CREATE INDEX IF NOT EXISTS "idx_attempts_test_id" ON "test_attempts" ("test_id");
         CREATE INDEX IF NOT EXISTS "idx_attempts_course_id" ON "test_attempts" ("course_id");
 
         CREATE TABLE IF NOT EXISTS "active_exam_sessions" (
           "user_id" text PRIMARY KEY,
           "test_id" text NOT NULL,
+          "course_id" text NOT NULL DEFAULT 'course_jee',
+          "exam_mode" text NOT NULL DEFAULT 'SIMULATION',
+          "timer_seconds_left" integer NOT NULL DEFAULT 0,
+          "current_question_idx" integer NOT NULL DEFAULT 0,
           "attempt_set_label" text NOT NULL DEFAULT 'Set A',
           "session_json" text NOT NULL,
           "updated_at" timestamp NOT NULL DEFAULT now()
         );
+
+        CREATE TABLE IF NOT EXISTS "question_bookmarks" (
+          "id" text PRIMARY KEY,
+          "user_id" text NOT NULL,
+          "question_id" text NOT NULL,
+          "course_id" text NOT NULL DEFAULT 'course_jee',
+          "collection" text NOT NULL DEFAULT 'Important Revision',
+          "note" text DEFAULT '',
+          "question_json" text,
+          "created_at" timestamp NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS "idx_bookmarks_user_id" ON "question_bookmarks" ("user_id");
+        CREATE INDEX IF NOT EXISTS "idx_bookmarks_question_id" ON "question_bookmarks" ("question_id");
 
         CREATE TABLE IF NOT EXISTS "user_bookmarks" (
           "id" text PRIMARY KEY,
@@ -348,14 +367,14 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
           "question_json" text,
           "created_at" timestamp NOT NULL DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS "idx_user_bookmarks_user_id" ON "user_bookmarks" ("user_id");
 
         CREATE TABLE IF NOT EXISTS "question_reports" (
           "id" text PRIMARY KEY,
           "question_id" text NOT NULL,
           "test_id" text,
-          "student_id" text NOT NULL,
-          "student_name" text NOT NULL,
+          "user_id" text NOT NULL DEFAULT '',
+          "student_id" text DEFAULT '',
+          "student_name" text NOT NULL DEFAULT '',
           "reason" text NOT NULL,
           "description" text NOT NULL,
           "status" text NOT NULL DEFAULT 'PENDING',
@@ -365,36 +384,151 @@ export async function ensureSchemaBootstrapped(): Promise<boolean> {
         CREATE INDEX IF NOT EXISTS "idx_question_reports_status" ON "question_reports" ("status");
       `);
 
-      // Ensure any newly added columns exist on pre-existing tables
+      // Ensure all columns exist on pre-existing tables across different migration versions
       await client.query(`
+        ALTER TABLE "courses" ADD COLUMN IF NOT EXISTS "name" text NOT NULL DEFAULT '';
+        ALTER TABLE "courses" ADD COLUMN IF NOT EXISTS "type" text NOT NULL DEFAULT 'JEE';
+        ALTER TABLE "courses" ADD COLUMN IF NOT EXISTS "description" text NOT NULL DEFAULT '';
+        ALTER TABLE "courses" ADD COLUMN IF NOT EXISTS "active" boolean NOT NULL DEFAULT true;
+        ALTER TABLE "courses" ADD COLUMN IF NOT EXISTS "created_at" timestamp NOT NULL DEFAULT now();
+
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "username" text;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "email" text;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "full_name" text NOT NULL DEFAULT '';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "password_hash" text NOT NULL DEFAULT '';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "role" text NOT NULL DEFAULT 'STUDENT';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "student_id" text;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "teacher_id" text;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "batch_id" text;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "class_name" text DEFAULT 'Class 12';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "exam_category" text NOT NULL DEFAULT 'JEE_MAIN';
         ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
         ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "course_type" text NOT NULL DEFAULT 'JEE';
         ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "enrollment_status" text NOT NULL DEFAULT 'ACTIVE';
         ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "assigned_courses_json" text NOT NULL DEFAULT '["JEE"]';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "target_year" integer NOT NULL DEFAULT 2026;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "subject_access_json" text NOT NULL DEFAULT '["Physics","Chemistry","Mathematics"]';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "test_access_json" text NOT NULL DEFAULT '[]';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "teacher_permissions_json" text NOT NULL DEFAULT '{"canCreateTests":true,"canCreateQuestions":true,"canManageBatches":true,"canResetStudentPasswords":true,"canViewAllStudents":false}';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "status" text NOT NULL DEFAULT 'ACTIVE';
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "must_change_password" boolean NOT NULL DEFAULT false;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "temp_password_hint" text;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "expires_at" timestamp;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "last_login" timestamp;
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "created_at" timestamp NOT NULL DEFAULT now();
+        ALTER TABLE "profiles" ADD COLUMN IF NOT EXISTS "updated_at" timestamp NOT NULL DEFAULT now();
+
+        ALTER TABLE "enrollments" ADD COLUMN IF NOT EXISTS "status" text NOT NULL DEFAULT 'ACTIVE';
+        ALTER TABLE "enrollments" ADD COLUMN IF NOT EXISTS "assigned_by" text NOT NULL DEFAULT 'usr-admin-01';
+        ALTER TABLE "enrollments" ADD COLUMN IF NOT EXISTS "created_at" timestamp NOT NULL DEFAULT now();
+        ALTER TABLE "enrollments" ADD COLUMN IF NOT EXISTS "updated_at" timestamp NOT NULL DEFAULT now();
+
+        ALTER TABLE "study_materials" ADD COLUMN IF NOT EXISTS "created_by" text NOT NULL DEFAULT 'usr-admin-01';
+        ALTER TABLE "study_materials" ADD COLUMN IF NOT EXISTS "description" text NOT NULL DEFAULT '';
+        ALTER TABLE "study_materials" ADD COLUMN IF NOT EXISTS "content_body" text NOT NULL DEFAULT '';
+
         ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
         ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "course_type" text NOT NULL DEFAULT 'JEE';
+        ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "class_name" text NOT NULL DEFAULT 'Class 12';
+        ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "teacher_id" text NOT NULL DEFAULT 'usr-teacher-01';
+        ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "teacher_name" text NOT NULL DEFAULT 'Faculty';
+        ALTER TABLE "batches" ADD COLUMN IF NOT EXISTS "status" text NOT NULL DEFAULT 'ACTIVE';
+
         ALTER TABLE "test_assignments" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
+        ALTER TABLE "test_assignments" ADD COLUMN IF NOT EXISTS "assigned_by_user_id" text NOT NULL DEFAULT 'usr-admin-01';
+        ALTER TABLE "test_assignments" ADD COLUMN IF NOT EXISTS "due_date" timestamp;
+        ALTER TABLE "test_assignments" ADD COLUMN IF NOT EXISTS "created_at" timestamp NOT NULL DEFAULT now();
+
+        ALTER TABLE "announcements" ADD COLUMN IF NOT EXISTS "content" text NOT NULL DEFAULT '';
         ALTER TABLE "announcements" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'ALL';
         ALTER TABLE "announcements" ADD COLUMN IF NOT EXISTS "course_type" text NOT NULL DEFAULT 'ALL';
+        ALTER TABLE "announcements" ADD COLUMN IF NOT EXISTS "target_audience" text NOT NULL DEFAULT 'ALL';
+
+        ALTER TABLE "password_recovery_requests" ADD COLUMN IF NOT EXISTS "user_name" text NOT NULL DEFAULT '';
+        ALTER TABLE "password_recovery_requests" ADD COLUMN IF NOT EXISTS "teacher_id" text;
+        ALTER TABLE "password_recovery_requests" ADD COLUMN IF NOT EXISTS "recovery_code" text;
+
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "course_type" text NOT NULL DEFAULT 'JEE';
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "normalized_text" text NOT NULL DEFAULT '';
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "fingerprint" text NOT NULL DEFAULT '';
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "concept_key" text NOT NULL DEFAULT '';
+        ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "tolerance" real;
+        ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "times_attempted" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "times_correct" integer NOT NULL DEFAULT 0;
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "times_used" integer NOT NULL DEFAULT 0;
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "last_used_at" timestamp;
         ALTER TABLE "questions" ADD COLUMN IF NOT EXISTS "test_ids_json" text NOT NULL DEFAULT '[]';
+
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "course_type" text NOT NULL DEFAULT 'JEE';
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "pattern_year" integer NOT NULL DEFAULT 2026;
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "blueprint_id" text;
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "pattern_source" text;
+        ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "test_data_json" text;
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "test_questions_json" text NOT NULL DEFAULT '[]';
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "attempt_snapshots_json" text NOT NULL DEFAULT '[]';
         ALTER TABLE "tests" ADD COLUMN IF NOT EXISTS "active_attempt_set" text NOT NULL DEFAULT 'Set A';
+
         ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
         ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "course_type" text NOT NULL DEFAULT 'JEE';
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "student_id" text NOT NULL DEFAULT '';
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "user_id" text DEFAULT '';
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "user_name" text NOT NULL DEFAULT '';
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "submitted_at" timestamp DEFAULT now();
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "percentage" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "attempt_rate" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "total_questions" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "total_attempted" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "total_correct" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "total_incorrect" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "total_unanswered" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "negative_marks_lost" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "simulated_percentile" real NOT NULL DEFAULT 0;
+        ALTER TABLE "test_attempts" ADD COLUMN IF NOT EXISTS "practice_rank" integer NOT NULL DEFAULT 1;
+        ALTER TABLE "test_attempts" ALTER COLUMN "user_id" DROP NOT NULL;
+        ALTER TABLE "test_attempts" ALTER COLUMN "user_id" SET DEFAULT '';
+        UPDATE "test_attempts" SET "student_id" = "user_id" WHERE ("student_id" = '' OR "student_id" IS NULL) AND "user_id" IS NOT NULL AND "user_id" <> '';
+
+        ALTER TABLE "active_exam_sessions" ADD COLUMN IF NOT EXISTS "course_id" text NOT NULL DEFAULT 'course_jee';
+        ALTER TABLE "active_exam_sessions" ADD COLUMN IF NOT EXISTS "exam_mode" text NOT NULL DEFAULT 'SIMULATION';
+        ALTER TABLE "active_exam_sessions" ADD COLUMN IF NOT EXISTS "timer_seconds_left" integer NOT NULL DEFAULT 0;
+        ALTER TABLE "active_exam_sessions" ADD COLUMN IF NOT EXISTS "current_question_idx" integer NOT NULL DEFAULT 0;
+
+        ALTER TABLE "question_reports" ADD COLUMN IF NOT EXISTS "user_id" text NOT NULL DEFAULT '';
+        ALTER TABLE "question_reports" ADD COLUMN IF NOT EXISTS "student_id" text DEFAULT '';
+        ALTER TABLE "question_reports" ALTER COLUMN "student_id" DROP NOT NULL;
+        ALTER TABLE "question_reports" ALTER COLUMN "student_id" SET DEFAULT '';
       `);
+
+      // Prevent recursive RLS policy stack depth overflow on server-managed PostgreSQL connections
+      try {
+        await client.query(`
+          ALTER TABLE IF EXISTS "courses" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "profiles" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "enrollments" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "study_materials" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "auth_sessions" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "batches" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "test_assignments" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "announcements" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "audit_logs" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "password_recovery_requests" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "platform_settings" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "questions" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "question_usage" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "tests" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "test_questions" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "test_attempts" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "active_exam_sessions" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "question_bookmarks" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "user_bookmarks" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "question_reports" DISABLE ROW LEVEL SECURITY;
+          ALTER TABLE IF EXISTS "users" DISABLE ROW LEVEL SECURITY;
+        `);
+      } catch {
+        // Ignore if user does not own table
+      }
 
       schemaBootstrapped = true;
       return true;

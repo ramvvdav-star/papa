@@ -4,10 +4,10 @@ import type {
   SubjectName,
   ExamType,
   PYQMetadata,
-} from '../types/exam.ts';
+} from '../types/exam.js';
 import {
   OFFICIAL_EXAM_BLUEPRINTS,
-} from './officialExamPatterns.ts';
+} from './officialExamPatterns.js';
 import {
   formatCanonicalQuestionId,
   enrichQuestionRecord,
@@ -17,8 +17,8 @@ import {
   normalizeQuestion,
   buildTestQuestionMappings,
   validateGeneratedTestQuestions,
-} from './questionBankEngine.ts';
-import { SEED_QUESTIONS } from './seedQuestions.ts';
+} from './questionBankEngine.js';
+import { SEED_QUESTIONS } from './seedQuestions.js';
 import {
   type DomainGeneratorSpec,
   PHYSICS_CURRICULUM_GENERATORS,
@@ -26,7 +26,7 @@ import {
   MATHEMATICS_CURRICULUM_GENERATORS,
   BOTANY_CURRICULUM_GENERATORS,
   ZOOLOGY_CURRICULUM_GENERATORS,
-} from './subjectCurriculumGenerators.ts';
+} from './subjectCurriculumGenerators.js';
 
 // ============================================================================
 // BUILD CENTRALIZED QUESTION BANK (REQUIREMENTS 1, 2, 3, 4, 13, 15)

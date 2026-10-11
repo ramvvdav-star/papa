@@ -1,4 +1,4 @@
-import type { ExamBlueprint, ExamPatternTemplate } from '../types/exam.ts';
+import type { ExamBlueprint, ExamPatternTemplate } from '../types/exam.js';
 
 export const OFFICIAL_EXAM_BLUEPRINTS: Record<string, ExamBlueprint> = {
   JEE_MAIN_2026: {
